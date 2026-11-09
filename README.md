@@ -2,123 +2,203 @@
 
 # Paper2MD-Translator
 
-**Generate a Japanese-translated Markdown file from a paper PDF/URL via Slack**
+**A Slack bot that turns a paper PDF or URL into a Japanese Markdown translation with a summary**
 
 English | [日本語](./docs/README_ja.md)
 
-</div>
-
-<div align="center">
 <img src="./images/Paper2MD-Translator_logo.png" alt="paper2md-translator" width=200px>
+
 </div>
 
-<div align="left">
-By using this app, you can generate a Japanese Markdown file from a paper PDF or from the URL of a paper PDF, while simultaneously producing a summary.
+## What it does
 
-## Instructions for Users
+- Send a paper in Slack and the bot replies in the thread with a Japanese summary, the translated Markdown, a ZIP with the Markdown and its figures, and the figure images.
+- [Dolphin-v2](https://github.com/bytedance/Dolphin) finds the figures, headings, paragraphs, formulas and references on each page; the text is translated from the page images by an OpenAI model (by default `gpt-6.1-terra` for the translation and `gpt-6.1-sol` for the summary).
+- Papers translated once are stored and returned immediately next time.
+- With `--no-cache`, nothing is kept on the server.
 
-First, from Slack’s user interface, complete the initial setup by following the instructions in [description.pdf](./description.pdf).<br>
-Next, invite the Paper2MD-Translator Bot to the channel where you want to use it, and submit a query by sending a message that mentions `@Paper2MD-Translator` together with the paper URL/PDF, as shown below.
+## Usage
+
+### Sending a paper
+
+Invite the bot to a channel and mention it with a paper.
 
 ```
 @Paper2MD-Translator
 https://arxiv.org/abs/2304.08485
 ```
 
-Currently supported paper formats are as follows.
+Supported sources:
 
-- Attach the paper PDF directly
-- URLs in the form of `http://hoge.pdf` or `https://hoge.pdf`
-- arXiv links
-  - e.g., `https://arxiv.org/abs/2304.08485`
-  - e.g., `https://arxiv.org/pdf/2304.08485`
+- an attached PDF
+- a PDF URL (such as `https://example.com/paper.pdf`)
+- arXiv links (`/abs/`, `/pdf/`, `/html/`)
+- Hugging Face Papers and alphaXiv links (handled as arXiv papers)
+- OpenReview links (`https://openreview.net/forum?id=...`)
+- ACL Anthology links (such as `https://aclanthology.org/2024.acl-long.1/`)
 
+If a long URL is not recognized, wrap it in backticks (`` ` ``).
 
-## Instructions for Operators/Administrators
+Before the first request, register your OpenAI API key in the bot's Home tab. If you also register a Gyazo access token, the posted Markdown links its figures to Gyazo image URLs; without it, the Markdown inside the ZIP still shows the figures.
 
-### Environment Setup
+### Papers that were already translated
+
+The summary and translation of every paper are stored and shared by all users, so a paper translated once is returned immediately.
+
+- arXiv papers are stored per version. `/abs/`, `/pdf/` and `/html/` links to the same version are the same paper.
+- A link without a version (such as `https://arxiv.org/abs/2408.03326`) means the latest version when the request arrives. If v2 was translated before and v3 has been published since, v3 is translated; the v2 result is still returned for `https://arxiv.org/abs/2408.03326v2`.
+- Other PDFs are identified by the SHA-256 of the file: the same file hits under any name, while a different file with the same name, or a changed file behind the same URL, is translated again.
+- Add `--refresh` (also `--force` or `再翻訳`) to translate a paper again; the new result replaces the stored one.
+- Results with failed segments are not stored.
+
+### Keeping nothing on the server
+
+Add `--no-cache` (also `no-cache`, `nocache`, `キャッシュなし` or `保存しない`).
+
+```
+@Paper2MD-Translator --no-cache
+https://arxiv.org/abs/2304.08485
+```
+
+The PDF you sent, the intermediate files and the results exist only in a private temporary directory of the bot process (by default in RAM under `/dev/shm`, mode `0700`). The directory is deleted after the results are posted, also when processing fails, and the bot reports the deletion in the thread. A paper that is already stored is still answered from the cache; nothing new is stored. To translate it again, add `--refresh` as well; the stored result stays as it is.
+
+Files posted to Slack, figures uploaded to Gyazo and OpenAI's own data handling are outside this scope. Requests to OpenAI are always sent with `store=false`.
+
+## Setup
+
+### Requirements
+
+- Python 3.10 and [uv](https://docs.astral.sh/uv/)
+- a GPU (Dolphin-v2 uses about 8 GB of GPU memory; it also runs on a CPU, but slowly)
+- permission to add an app to the Slack workspace
+- an OpenAI API key for each user (registered by each user in the Home tab)
+
+### Installation
 
 ```bash
-$ git clone https://github.com/Onely7/Paper2MD-Translator_for_slack.git
-$ cd Paper2MD-Translator_for_slack
+git clone https://github.com/Onely7/Paper2MD-Translator_for_slack.git
+cd Paper2MD-Translator_for_slack
+uv sync
 ```
 
-#### Setting Environment Variables
-
-Create a `.env` file under the project directory and fill in the following fields.
-
-```.env
-export SLACK_SIGNING_SECRET="<70*****>"
-export SLACK_BOT_TOKEN="<xo*****>"
-export PORT="<8888>"
-export NGROK_AUTHTOKEN="<2z*****>"
-export SAVE_PATH="<./results>"
-```
-
-* From **[Slack Your Apps](https://api.slack.com/apps)**, create a new app via "Create New App." On the “Paper2MD-Translator” app page, the `SLACK_SIGNING_SECRET` is available under **Settings → Basic Information**, and the `SLACK_BOT_TOKEN` is available under **Settings → Install App**.
-* `PORT`: Specify an available port on the server where Paper2MD-Translator will run.
-* Create an account on the **[ngrok homepage](https://ngrok.com/)** to obtain the `NGROK_AUTHTOKEN`. By leveraging ngrok, you can associate a local port with a public URL, allowing external access to this app running locally.
-* `SAVE_PATH`: Specify the path where intermediate data processed by Paper2MD-Translator and the final artifacts (English papers translated into Japanese Markdown files) will be saved.
-
-#### Create a Python Virtual Environment
-
-Move to the project root directory and run the following.
+### Dolphin-v2 model
 
 ```bash
-$ cd Paper2MD-Translator_for_slack
-$ uv python install 3.10.18
-$ uv python pin 3.10.18
-$ uv sync
+uv run hf download ByteDance/Dolphin-v2 --local-dir models/Dolphin-v2
 ```
 
-#### Download Pre-trained Document-Parsing Model
+The model is about 7.5 GB. To keep it on another disk, set `DOLPHIN_MODEL_PATH` or symlink it to `models/Dolphin-v2`. It runs in bf16 on Ampere or newer GPUs and in fp16 on older ones such as the RTX 20 series.
 
-Paper2MD-Translator uses the open-source tool [Dolphin](https://github.com/bytedance/Dolphin) to separate figures/tables and text sections within paper pages (images).
-Download in advance the [pre-trained model](https://huggingface.co/ByteDance/Dolphin-1.5) provided by the ByteDance/Dolphin team that is used by this tool.
+Dolphin-v2 is distributed under the **Qwen Research License (non-commercial use only)**, not under the MIT license of Dolphin 1.x. See [Dolphin/LICENSE](./Dolphin/LICENSE).
+
+### Creating the Slack app
+
+1. In [Slack Your Apps](https://api.slack.com/apps), choose "Create New App" and then "From a manifest", and paste the contents of [slack_manifest.yaml](./slack_manifest.yaml).
+2. Install the app to the workspace and copy the Bot User OAuth Token (`xoxb-...`) from "OAuth & Permissions".
+3. Under "Basic Information" > App-Level Tokens, create a token (`xapp-...`) with the `connections:write` scope.
+
+The manifest uses Socket Mode: the bot connects to Slack itself, so neither a public URL nor ngrok is needed.
+
+### Environment variables
+
+Create `.env` in the repository root with these two lines:
 
 ```bash
-$ uv run huggingface-cli download ByteDance/Dolphin-1.5 --local-dir ./Dolphin/hf_model
+export SLACK_BOT_TOKEN="xoxb-..."
+export SLACK_APP_TOKEN="xapp-..."
 ```
 
+`.env` holds tokens; make it readable only by you with `chmod 600 .env`.
 
+Optional settings (defaults in parentheses):
 
-### Start the Paper2MD-Translator Server
+| Variable | Meaning |
+| --- | --- |
+| `TRANSLATION_MODEL` | OpenAI model for the translation (`gpt-6.1-terra`) |
+| `SUMMARY_MODEL` | OpenAI model for the summary (`gpt-6.1-sol`) |
+| `TRANSLATION_REASONING_EFFORT` / `SUMMARY_REASONING_EFFORT` | Reasoning effort (`none` / `medium`). Values a model does not accept are replaced automatically (e.g. `none` becomes `low` on `gpt-6.1-sol`) |
+| `TRANSLATION_IMAGE_DETAIL` | Image detail of the page crops sent to the model (`auto`) |
+| `OPENAI_MAX_CONCURRENCY` | Parallel OpenAI requests per paper (`8`) |
+| `PAGE_RESOLUTION` | Longest side in pixels of the rendered PDF pages (`4000`) |
+| `MAX_PDF_PAGES` / `MAX_PDF_MB` | Largest accepted PDF (`80` pages / `100` MB) |
+| `MAX_CONCURRENT_JOBS` | Papers translated at the same time (`2`) |
+| `PAPER_CACHE_DIR` | Where translated papers are stored (`data/cache`) |
+| `NO_CACHE_WORKDIR` | Where `--no-cache` creates its temporary directories (`/dev/shm`) |
+| `KEY_DB_PATH` | SQLite file with the users' API keys (`user_keys.db`) |
+| `DOLPHIN_MODEL_PATH` | Location of the Dolphin-v2 model (`models/Dolphin-v2`) |
+| `DOLPHIN_DEVICE` / `DOLPHIN_DTYPE` | Device and precision for Dolphin-v2 (`cuda`; bf16 or fp16 depending on the GPU) |
+| `DOLPHIN_MAX_BATCH_SIZE` | Elements read by Dolphin-v2 in parallel (`4`) |
+| `DOLPHIN_KEEP_LOADED` | `1` keeps Dolphin-v2 on the GPU between requests (`0`) |
+| `DOLPHIN_RECOGNIZE_LABELS` | `all` makes Dolphin-v2 read the text of every element like upstream (by default only the title, headings and references, which the translation uses) |
+| `LOG_LEVEL` | Log level (`INFO`) |
 
-#### Preparation 1: Make it able to accept queries from Slack
+`PAPER_CACHE_DIR` gets one directory per paper (`arxiv-<id>v<version>/` or `sha256-<hash>/`) with the PDF, the summary, the Markdown, the figures, the intermediate files and a `manifest.json`. The directory is created with mode `0700`.
 
-In Terminal 1, start the Paper2MD-Translator server.<br>
-In Terminal 2, start the ngrok server so that you can associate the server’s local port with a public URL and allow external access to this app running locally.<br>
-As shown below, open two terminals and keep them running simultaneously. (If you can use tmux, we recommend using tmux to keep both servers running at all times.)
-
-##### Terminal 1
+### Starting the bot
 
 ```bash
-# Put it in a state of waiting for queries from Slack
-$ /bin/bash app.sh
+scripts/run_app.sh
 ```
 
-##### Terminal 2
+The script loads `.env` and starts the bot. It prints a warning when other users can read `.env`. Run it inside tmux or similar to keep it running after you log out.
+
+### HTTP mode with ngrok
+
+Without Socket Mode, leave out `SLACK_APP_TOKEN` and put `SLACK_SIGNING_SECRET` (the Signing Secret from Basic Information), `PORT` and `NGROK_AUTHTOKEN` in `.env`. In the manifest, set `socket_mode_enabled: false` and set the Request URL of Event Subscriptions and Interactivity to `https://<your ngrok domain>/slack/events`.
 
 ```bash
-# Associate the local port with a public URL via ngrok
-$ /bin/bash run_ngrok.sh
-
-## Example output
-Ingress established at NgrokTunnel: "https://ca**********.ngrok-free.app" -> "http://localhost:8888"
+scripts/run_app.sh    # terminal 1
+scripts/run_ngrok.sh  # terminal 2, prints the Request URL
 ```
 
-As a result, the internal local URL `"http://localhost:8888"` is associated with the externally accessible `"https://ca**********.ngrok-free.app"`.<br>
-Copy this externally accessible URL (`"https://ca**********.ngrok-free.app"`) because you will use it in later settings.
+On ngrok's free plan the URL changes every time ngrok starts, and the Request URL in Slack has to be updated each time.
 
-#### Preparation 2: Configure the Slack App
+### Translating from the command line
 
-Next, you need to configure the app properly on the Slack side.<br>
-From the “Paper2MD-Translator” app page under **[Slack Your Apps](https://api.slack.com/apps)**, configure the various settings.<br>
-Details of the settings are provided in **[this PDF file](./paper2md_translator_app_settings.pdf)**, so please refer to it together.<br>
-For **Features → Interactivity & Shortcuts → Interactivity → Request URL** and **Features → Event Subscriptions → Enable Events → Request URL**, use the externally accessible ngrok URL you copied earlier (`"https://ca**********.ngrok-free.app"`) and enter `"https://ca**********.ngrok-free.app/slack/events"` (don’t forget to append `/slack/events`).
+The pipeline also runs without Slack. Set `OPENAI_API_KEY` and run:
 
-This completes the preparation for operators/administrators.<br>
-Users should now be able to use it.
+```bash
+OPENAI_API_KEY=sk-... uv run python -m paper2md translate https://arxiv.org/abs/2304.08485 --out results/llava
+```
+
+`--gyazo` (uses `GYAZO_ACCESS_TOKEN`), `--translation-model` and `--summary-model` are also available.
+
+### Managing the cache
+
+```bash
+uv run python -m paper2md cache list                      # stored papers
+uv run python -m paper2md cache show arxiv:2408.03326v3   # details of one entry
+uv run python -m paper2md cache remove arxiv:2408.03326v3 # delete one entry
+uv run python -m paper2md cache prune --older-than 180    # delete results stored more than 180 days ago
+```
+
+## How it works
+
+1. The bot finds the paper in the message and looks it up in the cache (arXiv papers by their latest version, other PDFs by SHA-256).
+2. If it is not stored, the PDF pages are rendered to images and Dolphin-v2 finds the position and reading order of figures, headings, paragraphs and other elements.
+3. The text is translated by an OpenAI model from the regions cropped out of the pages. The title and references are cleaned up from the text Dolphin-v2 read.
+4. The translations are assembled into Markdown, summarized, posted to Slack and stored.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `app.py` | Starts the bot (Socket Mode or HTTP mode) |
+| `bot/` | Slack events, request handling, the Home tab, API key storage |
+| `paper2md/` | The translation pipeline (PDF, Dolphin-v2, layout, prompts, translation, Markdown, cache, CLI) |
+| `Dolphin/` | Code of [bytedance/Dolphin](https://github.com/bytedance/Dolphin) at commit `befa5da`; only import lines are changed |
+| `scripts/` | Start-up and ngrok scripts |
+| `tests/` | Unit tests |
+| `slack_manifest.yaml` | Slack app manifest |
+| `docs/description.pdf` | Guide for users, posted when the bot is invited to a channel |
+
+## Development
+
+```bash
+uv run python -m unittest discover -s tests -t .  # needs neither a GPU nor the network
+uv run ruff check .
+uv run ruff format --check .
+```
 
 ## Citation
 
