@@ -1,169 +1,174 @@
-"""
-bot/home.py  –  OpenAI & Gemini API Key 対応版
-"""
+"""Home tab: register, check and delete the user's API keys."""
+
+from __future__ import annotations
 
 import logging
+import re
 
+import aiohttp
+from openai import AsyncOpenAI, AuthenticationError
+from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
-from . import app
-from .db import keystore
+from paper2md.config import Settings
+
+from . import messages
+from .keystore import PROVIDERS, KeyStore
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_NAMES = {"openai": "OpenAI", "gyazo": "Gyazo"}
+PROVIDER_NOTES = {
+    "openai": "必須。翻訳と要約に使います。",
+    "gyazo": "任意。登録すると、Markdown 内の図表が Gyazo の画像 URL になります。",
+}
+VALIDATION_TIMEOUT = 2.0  # a modal submission must be acknowledged within 3 seconds
 
-# ================= Home Tab =========================
-async def _publish_home(client: AsyncWebClient, user_id: str) -> None:
-    """ユーザーごとに OpenAI / Gemini の登録状況を表示"""
-    has_openai = await keystore.has_key(f"{user_id}_openai")
-    has_gemini = await keystore.has_key(f"{user_id}_gemini")
-    has_claude = await keystore.has_key(f"{user_id}_claude")
-    has_gyazo = await keystore.has_key(f"{user_id}_gyazo")
 
-    status_openai = "✅ 登録済み" if has_openai else "❌ 未登録"
-    status_gemini = "✅ 登録済み" if has_gemini else "❌ 未登録"
-    status_claude = "✅ 登録済み" if has_claude else "❌ 未登録"
-    status_gyazo = "✅ 登録済み" if has_gyazo else "❌ 未登録"
+def _mask(key: str) -> str:
+    return f"••••{key[-4:]}" if len(key) > 8 else "••••"
 
-    resp = await client.views_publish(
-        user_id=user_id,
-        view={
-            "type": "home",
-            "blocks": [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*OpenAI API Key*　→　{status_openai}",
-                    },
+
+async def validate_key(provider: str, key: str) -> str | None:
+    """Return an error message when the service rejects the key (other failures are ignored)."""
+    try:
+        if provider == "openai":
+            async with AsyncOpenAI(api_key=key, max_retries=0, timeout=VALIDATION_TIMEOUT) as client:
+                await client.models.list()
+        elif provider == "gyazo":
+            timeout = aiohttp.ClientTimeout(total=VALIDATION_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    "https://api.gyazo.com/api/users/me", headers={"Authorization": f"Bearer {key}"}
+                ) as response:
+                    if response.status in (401, 403):
+                        return "Gyazo に拒否されました。アクセストークンを確認してください。"
+    except AuthenticationError:
+        return "OpenAI に拒否されました。API Key を確認してください。"
+    except Exception as e:  # timeouts and network errors: accept the key
+        logger.info("Could not validate the %s key: %s", provider, e)
+    return None
+
+
+def home_view(keys: dict[str, str | None]) -> dict:
+    settings = Settings.from_env()
+    blocks: list[dict] = [{"type": "header", "text": {"type": "plain_text", "text": "API Key"}}]
+    for provider in PROVIDERS:
+        key = keys.get(provider)
+        status = f"✅ 登録済み（{_mask(key)}）" if key else "❌ 未登録"
+        block = {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*{PROVIDER_NAMES[provider]}*　{status}\n{PROVIDER_NOTES[provider]}",
+            },
+        }
+        if key:
+            block["accessory"] = {
+                "type": "button",
+                "action_id": f"delete_key_{provider}",
+                "text": {"type": "plain_text", "text": "削除"},
+                "style": "danger",
+                "confirm": {
+                    "title": {"type": "plain_text", "text": "API Key の削除"},
+                    "text": {"type": "plain_text", "text": f"{PROVIDER_NAMES[provider]} の API Key を削除しますか？"},
+                    "confirm": {"type": "plain_text", "text": "削除"},
+                    "deny": {"type": "plain_text", "text": "キャンセル"},
                 },
+            }
+        blocks.append(block)
+    blocks += [
+        {
+            "type": "actions",
+            "elements": [
                 {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Gemini API Key*　→　{status_gemini}",
-                    },
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Claude API Key*　→　{status_claude}",
-                    },
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Gyazo API Key*　→　{status_gyazo}",
-                    },
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        # どちらのキーも同じモーダルで登録
-                        {
-                            "type": "button",
-                            "action_id": "open_key_modal",
-                            "text": {"type": "plain_text", "text": "キーを登録 / 更新"},
-                        }
-                    ],
-                },
+                    "type": "button",
+                    "action_id": "open_key_modal",
+                    "text": {"type": "plain_text", "text": "API Key を登録 / 更新"},
+                }
             ],
         },
-    )
-    if not resp.get("ok"):
-        logger.error("views.publish failed: %s", resp)
-
-
-@app.event("app_home_opened")
-async def handle_home_opened(event, client: AsyncWebClient):
-    uid = event["user"]
-    await _publish_home(client, uid)
-    logger.debug("Home published for %s", uid)
-
-
-# =============== モーダル表示 / 保存 =================
-@app.action("open_key_modal")
-async def show_key_modal(ack, body, client: AsyncWebClient):
-    await ack()
-    await client.views_open(
-        trigger_id=body["trigger_id"],
-        view={
-            "type": "modal",
-            "callback_id": "save_key",
-            "title": {"type": "plain_text", "text": "API Key 登録"},
-            "submit": {"type": "plain_text", "text": "保存"},
-            "close": {"type": "plain_text", "text": "キャンセル"},
-            "blocks": [
-                {  # ① プロバイダ選択
-                    "type": "input",
-                    "block_id": "provider",
-                    "label": {"type": "plain_text", "text": "プロバイダ"},
-                    "element": {
-                        "type": "static_select",
-                        "action_id": "provider_select",
-                        "initial_option": {
-                            "text": {"type": "plain_text", "text": "OpenAI"},
-                            "value": "openai",
-                        },
-                        "options": [
-                            {
-                                "text": {"type": "plain_text", "text": "OpenAI"},
-                                "value": "openai",
-                            },
-                            {
-                                "text": {"type": "plain_text", "text": "Gemini"},
-                                "value": "gemini",
-                            },
-                            {
-                                "text": {"type": "plain_text", "text": "Claude"},
-                                "value": "claude",
-                            },
-                            {
-                                "text": {"type": "plain_text", "text": "Gyazo"},
-                                "value": "gyazo",
-                            },
-                        ],
-                    },
-                },
-                {  # ② API Key 入力
-                    "type": "input",
-                    "block_id": "keyblock",
-                    "label": {"type": "plain_text", "text": "API Key"},
-                    "element": {
-                        "type": "plain_text_input",
-                        "action_id": "key_input",
-                        "placeholder": {
-                            "type": "plain_text",
-                            "text": "sk-... / xyz-...",
-                        },
-                    },
-                },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"翻訳モデル: `{settings.translation_model}`　要約モデル: `{settings.summary_model}`",
+                }
             ],
         },
-    )
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": messages.USAGE}},
+    ]
+    return {"type": "home", "blocks": blocks}
 
 
-@app.view("save_key")
-async def save_key(ack, body, view, client: AsyncWebClient):
-    await ack()
-    uid = body["user"]["id"]
+KEY_MODAL = {
+    "type": "modal",
+    "callback_id": "save_key",
+    "title": {"type": "plain_text", "text": "API Key 登録"},
+    "submit": {"type": "plain_text", "text": "保存"},
+    "close": {"type": "plain_text", "text": "キャンセル"},
+    "blocks": [
+        {
+            "type": "input",
+            "block_id": "provider",
+            "label": {"type": "plain_text", "text": "サービス"},
+            "element": {
+                "type": "static_select",
+                "action_id": "provider_select",
+                "initial_option": {"text": {"type": "plain_text", "text": "OpenAI"}, "value": "openai"},
+                "options": [{"text": {"type": "plain_text", "text": PROVIDER_NAMES[p]}, "value": p} for p in PROVIDERS],
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "keyblock",
+            "label": {"type": "plain_text", "text": "API Key"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "key_input",
+                "placeholder": {"type": "plain_text", "text": "sk-..."},
+            },
+        },
+    ],
+}
 
-    provider = view["state"]["values"]["provider"]["provider_select"][
-        "selected_option"
-    ]["value"]
-    key_value = view["state"]["values"]["keyblock"]["key_input"]["value"].strip()
 
-    # 省略チェック (OpenAI は sk- / Gemini は AI... が一般的だが厳密に弾かない)
-    if not key_value:
-        await client.chat_postEphemeral(
-            channel=uid, user=uid, text="❌ 空のキーは保存できません。"
-        )
-        return
+def register(app: AsyncApp, keystore: KeyStore) -> None:
+    async def publish(client: AsyncWebClient, user_id: str) -> None:
+        await client.views_publish(user_id=user_id, view=home_view(await keystore.keys_for(user_id)))
 
-    key_name = f"{uid}_{provider}"
-    await keystore.save_key(key_name, key_value)
-    logger.info("%s key saved for %s", provider, uid)
+    @app.event("app_home_opened")
+    async def on_home_opened(event, client):
+        if event.get("tab", "home") == "home":
+            await publish(client, event["user"])
 
-    await _publish_home(client, uid)
+    @app.action("open_key_modal")
+    async def open_key_modal(ack, body, client):
+        await ack()
+        await client.views_open(trigger_id=body["trigger_id"], view=KEY_MODAL)
+
+    @app.action(re.compile(r"^delete_key_(openai|gyazo)$"))
+    async def delete_key(ack, body, action, client):
+        await ack()
+        user_id = body["user"]["id"]
+        await keystore.delete(user_id, action["action_id"].removeprefix("delete_key_"))
+        await publish(client, user_id)
+
+    @app.view("save_key")
+    async def save_key(ack, body, view, client):
+        values = view["state"]["values"]
+        provider = values["provider"]["provider_select"]["selected_option"]["value"]
+        key = (values["keyblock"]["key_input"]["value"] or "").strip()
+        if not key:
+            await ack(response_action="errors", errors={"keyblock": "API Key を入力してください。"})
+            return
+        if problem := await validate_key(provider, key):
+            await ack(response_action="errors", errors={"keyblock": problem})
+            return
+        await ack()
+        user_id = body["user"]["id"]
+        await keystore.set(user_id, provider, key)
+        logger.info("%s key saved for a user", provider)
+        await publish(client, user_id)
