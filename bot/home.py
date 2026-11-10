@@ -1,4 +1,4 @@
-"""Home tab: register, check and delete the user's API keys."""
+"""Home tab: the user's API keys and the models (with reasoning effort) used for their requests."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from paper2md.config import Settings
+from paper2md.models import ModelChoice, coerce_effort, model_spec, offered_models
 
 from . import messages
 from .keystore import PROVIDERS, KeyStore
@@ -22,11 +23,22 @@ PROVIDER_NOTES = {
     "openai": "必須。翻訳と要約に使います。",
     "gyazo": "任意。登録すると、Markdown 内の図表が Gyazo の画像 URL になります。",
 }
+TASKS = {"translation": ("翻訳", "本文の翻訳に使います。"), "summary": ("要約", "要約の作成に使います。")}
+MODEL_NOTE = (
+    "括弧内は 100 万トークンあたりの料金（入力 / 出力）です。"
+    "選べる Reasoning Effort はモデルによって違います（GPT-6.1 Sol と GPT-6 Astra では none を選べません）。"
+    "Reasoning Effort を上げると精度が上がることがありますが、時間と料金が増えます。"
+)
 VALIDATION_TIMEOUT = 2.0  # a modal submission must be acknowledged within 3 seconds
+_PREFERENCE_ACTION_RE = re.compile(r"^pref_(translation|summary)_(model|effort)$")
 
 
 def _mask(key: str) -> str:
     return f"••••{key[-4:]}" if len(key) > 8 else "••••"
+
+
+def _option(text: str, value: str) -> dict:
+    return {"text": {"type": "plain_text", "text": text}, "value": value}
 
 
 async def validate_key(provider: str, key: str) -> str | None:
@@ -50,18 +62,14 @@ async def validate_key(provider: str, key: str) -> str | None:
     return None
 
 
-def home_view(keys: dict[str, str | None]) -> dict:
-    settings = Settings.from_env()
+def _key_blocks(keys: dict[str, str | None]) -> list[dict]:
     blocks: list[dict] = [{"type": "header", "text": {"type": "plain_text", "text": "API Key"}}]
     for provider in PROVIDERS:
         key = keys.get(provider)
         status = f"✅ 登録済み（{_mask(key)}）" if key else "❌ 未登録"
         block = {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*{PROVIDER_NAMES[provider]}*　{status}\n{PROVIDER_NOTES[provider]}",
-            },
+            "text": {"type": "mrkdwn", "text": f"*{PROVIDER_NAMES[provider]}*　{status}\n{PROVIDER_NOTES[provider]}"},
         }
         if key:
             block["accessory"] = {
@@ -77,7 +85,7 @@ def home_view(keys: dict[str, str | None]) -> dict:
                 },
             }
         blocks.append(block)
-    blocks += [
+    blocks.append(
         {
             "type": "actions",
             "elements": [
@@ -87,19 +95,72 @@ def home_view(keys: dict[str, str | None]) -> dict:
                     "text": {"type": "plain_text", "text": "API Key を登録 / 更新"},
                 }
             ],
-        },
+        }
+    )
+    return blocks
+
+
+def _model_actions(task: str, model: str, effort: str | None, settings: Settings) -> dict:
+    spec = model_spec(model)
+    elements = [
         {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": f"翻訳モデル: `{settings.translation_model}`　要約モデル: `{settings.summary_model}`",
-                }
-            ],
-        },
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": messages.USAGE}},
+            "type": "static_select",
+            "action_id": f"pref_{task}_model",
+            "placeholder": {"type": "plain_text", "text": "モデル"},
+            "initial_option": _option(spec.label, spec.id),
+            "options": [_option(other.label, other.id) for other in offered_models(settings)],
+        }
     ]
+    if spec.efforts and effort:
+        elements.append(
+            {
+                "type": "static_select",
+                "action_id": f"pref_{task}_effort",
+                "placeholder": {"type": "plain_text", "text": "Reasoning Effort"},
+                "initial_option": _option(f"effort: {effort}", effort),
+                "options": [_option(f"effort: {value}", value) for value in spec.efforts],
+            }
+        )
+    # the block id changes with the model, so Slack redraws the effort menu with that model's values
+    return {"type": "actions", "block_id": f"pref_{task}_{model}"[:255], "elements": elements}
+
+
+def _model_blocks(preferences: dict[str, str], settings: Settings, notice: str | None) -> list[dict]:
+    choice = ModelChoice.resolve(preferences, settings)
+    blocks: list[dict] = [{"type": "divider"}, {"type": "header", "text": {"type": "plain_text", "text": "モデル"}}]
+    for task, (name, note) in TASKS.items():
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{name}*　{note}"}})
+        blocks.append(
+            _model_actions(task, getattr(choice, f"{task}_model"), getattr(choice, f"{task}_effort"), settings)
+        )
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": MODEL_NOTE}]})
+    if notice:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"ℹ️ {notice}"}})
+    if preferences:
+        blocks.append(
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "action_id": "pref_reset",
+                        "text": {"type": "plain_text", "text": "サーバーの既定値に戻す"},
+                    }
+                ],
+            }
+        )
+    return blocks
+
+
+def home_view(
+    keys: dict[str, str | None],
+    preferences: dict[str, str] | None = None,
+    settings: Settings | None = None,
+    notice: str | None = None,
+) -> dict:
+    settings = settings or Settings.from_env()
+    blocks = _key_blocks(keys) + _model_blocks(preferences or {}, settings, notice)
+    blocks += [{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": messages.USAGE}}]
     return {"type": "home", "blocks": blocks}
 
 
@@ -117,8 +178,8 @@ KEY_MODAL = {
             "element": {
                 "type": "static_select",
                 "action_id": "provider_select",
-                "initial_option": {"text": {"type": "plain_text", "text": "OpenAI"}, "value": "openai"},
-                "options": [{"text": {"type": "plain_text", "text": PROVIDER_NAMES[p]}, "value": p} for p in PROVIDERS],
+                "initial_option": _option("OpenAI", "openai"),
+                "options": [_option(PROVIDER_NAMES[p], p) for p in PROVIDERS],
             },
         },
         {
@@ -135,9 +196,32 @@ KEY_MODAL = {
 }
 
 
+async def change_preference(keystore: KeyStore, user_id: str, action_id: str, value: str) -> str | None:
+    """Save a model or effort picked in the Home tab; return a notice for the user, if any."""
+    match = _PREFERENCE_ACTION_RE.match(action_id)
+    if not match or not value:
+        return None
+    task, field = match.groups()
+    settings = Settings.from_env()
+    choice = ModelChoice.resolve(await keystore.preferences(user_id), settings)
+    if field == "model":
+        if value not in {spec.id for spec in offered_models(settings)}:
+            return None
+        current = getattr(choice, f"{task}_effort")
+        effort = coerce_effort(value, current)
+        await keystore.set_preferences(user_id, {f"{task}_model": value, f"{task}_effort": effort})
+        if current and effort and effort != current:
+            return messages.effort_changed(model_spec(value).name, current, effort)
+        return None
+    if value in model_spec(getattr(choice, f"{task}_model")).efforts:
+        await keystore.set_preferences(user_id, {f"{task}_effort": value})
+    return None
+
+
 def register(app: AsyncApp, keystore: KeyStore) -> None:
-    async def publish(client: AsyncWebClient, user_id: str) -> None:
-        await client.views_publish(user_id=user_id, view=home_view(await keystore.keys_for(user_id)))
+    async def publish(client: AsyncWebClient, user_id: str, notice: str | None = None) -> None:
+        view = home_view(await keystore.keys_for(user_id), await keystore.preferences(user_id), notice=notice)
+        await client.views_publish(user_id=user_id, view=view)
 
     @app.event("app_home_opened")
     async def on_home_opened(event, client):
@@ -154,6 +238,21 @@ def register(app: AsyncApp, keystore: KeyStore) -> None:
         await ack()
         user_id = body["user"]["id"]
         await keystore.delete(user_id, action["action_id"].removeprefix("delete_key_"))
+        await publish(client, user_id)
+
+    @app.action(_PREFERENCE_ACTION_RE)
+    async def pick_model(ack, body, action, client):
+        await ack()
+        user_id = body["user"]["id"]
+        value = (action.get("selected_option") or {}).get("value", "")
+        notice = await change_preference(keystore, user_id, action["action_id"], value)
+        await publish(client, user_id, notice)
+
+    @app.action("pref_reset")
+    async def reset_models(ack, body, client):
+        await ack()
+        user_id = body["user"]["id"]
+        await keystore.clear_preferences(user_id)
         await publish(client, user_id)
 
     @app.view("save_key")

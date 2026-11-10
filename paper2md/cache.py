@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # avoid importing torch for cache-only use (e.g. the CLI)
 
 logger = logging.getLogger(__name__)
 
-CACHE_FORMAT_VERSION = 2
+CACHE_FORMAT_VERSION = 3  # 3: the manifest records the reasoning efforts
 _ENTRY_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -123,6 +123,18 @@ class CachedPaper:
     @property
     def translation_model(self) -> str:
         return self.manifest.get("translation_model") or "?"
+
+    @property
+    def translation_effort(self) -> str | None:
+        return self.manifest.get("translation_effort")
+
+    @property
+    def summary_model(self) -> str:
+        return self.manifest.get("summary_model") or "?"
+
+    @property
+    def summary_effort(self) -> str | None:
+        return self.manifest.get("summary_effort")
 
 
 class PaperCache:
@@ -233,7 +245,9 @@ class PaperCache:
             "created_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "title": result.title,
             "translation_model": result.translation_model,
+            "translation_effort": result.translation_effort,
             "summary_model": result.summary_model,
+            "summary_effort": result.summary_effort,
             **(info or {}),
             "files": files,
         }

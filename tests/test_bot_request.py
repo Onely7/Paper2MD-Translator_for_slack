@@ -83,13 +83,40 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(self.h.uploads, RESULT)
 
     def test_refresh_replaces(self):
+        sol = {"translation_model": "gpt-6.1-sol"}
         self.h.run(ARXIV)
-        self.h.translation_model = "gpt-6.1-sol"
-        self.h.run("<@UBOT> --refresh <https://arxiv.org/abs/2408.03326>")
+        self.h.run("<@UBOT> --refresh <https://arxiv.org/abs/2408.03326>", preferences=sol)
         self.assertEqual(self.h.pipeline_calls, 2)
+        self.h.run(ARXIV, preferences=sol)
+        self.assertEqual(self.h.pipeline_calls, 2)
+        hit = [t for t in self.h.posted if t.startswith("♻️")][-1]
+        self.assertIn("`gpt-6.1-sol`（effort: low）", hit)  # the stored result was made with Sol
+        self.assertNotIn("今の設定", hit)  # ... which is also the user's choice
+
+    def test_user_models_reach_the_pipeline(self):
+        preferences = {
+            "translation_model": "gpt-6.1-sol",
+            "translation_effort": "none",  # Sol has no "none": the closest effort is used
+            "summary_model": "gpt-6-luna",
+            "summary_effort": "max",
+        }
+        self.h.run(ARXIV, preferences=preferences)
+        settings = self.h.pipeline_settings[0]
+        self.assertEqual(
+            (settings.translation_model, settings.translation_effort, settings.summary_model, settings.summary_effort),
+            ("gpt-6.1-sol", "low", "gpt-6-luna", "max"),
+        )
+        self.assertTrue(any(t.startswith("🤖") and "`gpt-6.1-sol`（effort: low）" in t for t in self.h.posted))
+        manifest = json.loads((self.h.cache_dir / "arxiv-2408.03326v3/manifest.json").read_text())
+        self.assertEqual((manifest["translation_model"], manifest["summary_effort"]), ("gpt-6.1-sol", "max"))
+
+    def test_cache_hit_tells_the_models(self):
         self.h.run(ARXIV)
-        self.assertEqual(self.h.pipeline_calls, 2)
-        self.assertIn("gpt-6.1-sol", [t for t in self.h.posted if t.startswith("♻️")][-1])
+        self.h.run(ARXIV, preferences={"translation_model": "gpt-6-astra", "translation_effort": "high"})
+        hit = [t for t in self.h.posted if t.startswith("♻️")][-1]
+        self.assertIn("`gpt-6.1-terra`（effort: none）", hit)
+        self.assertIn("今の設定（翻訳 `gpt-6-astra`（effort: high）", hit)
+        self.assertEqual(self.h.pipeline_calls, 1)  # the stored result is still returned
 
     def test_partial_failure_is_not_cached(self):
         self.h.failed_segments = 1

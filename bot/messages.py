@@ -14,7 +14,9 @@ USAGE = (
     "*サーバーにデータを残したくない場合*\n"
     "`--no-cache`（または `キャッシュなし`）を付けると、送った PDF・途中のファイル・結果を一時領域だけで扱い、"
     "結果を投稿したあとすべて削除します。\n"
-    "```@Paper2MD-Translator --no-cache\nhttps://arxiv.org/abs/0000.00000```"
+    "```@Paper2MD-Translator --no-cache\nhttps://arxiv.org/abs/0000.00000```\n"
+    "*モデル*\n"
+    "翻訳と要約に使うモデルと Reasoning Effort は、Paper2MD-Translator の Home タブの「モデル」で選べます。"
 )
 WELCOME = (
     "ご招待ありがとうございます！🎉\n"
@@ -39,11 +41,20 @@ RESULT_FILES = "*翻訳結果*（ZIP には Markdown と図表画像が入って
 FIGURES = "*図表*"
 
 
-def cache_hit(subject: str, date: str, model: str) -> str:
-    return (
-        f"♻️ {subject} {date} に翻訳済みなので、保存済みの結果を返します（翻訳モデル: {model}）。\n"
-        "最新の設定で翻訳し直す場合は `--refresh` を付けて送ってください。"
-    )
+def cache_hit(subject: str, date: str, cached_models: str, current_models: str | None = None) -> str:
+    """``current_models`` is given when the user's models differ from the ones of the stored result."""
+    text = f"♻️ {subject} {date} に翻訳済みなので、保存済みの結果を返します（{cached_models}）。\n"
+    if current_models:
+        return text + f"今の設定（{current_models}）で翻訳し直すときは、`--refresh` を付けて送ってください。"
+    return text + "翻訳し直すときは、`--refresh` を付けて送ってください。"
+
+
+def translating_with(models: str) -> str:
+    return f"🤖 {models} で翻訳します。"
+
+
+def effort_changed(model_name: str, before: str, after: str) -> str:
+    return f"{model_name} では Reasoning Effort に {before} を選べないため、{after} にしました。"
 
 
 def new_version(arxiv_id: str, done: str, latest: int) -> str:

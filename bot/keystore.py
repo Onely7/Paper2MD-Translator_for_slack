@@ -1,5 +1,5 @@
 """
-Per-user API keys (OpenAI, Gyazo) in SQLite.
+Per-user API keys (OpenAI, Gyazo) and model choices in SQLite.
 
 The database file (and its -wal/-shm files) is made readable by the owner only:
 on a shared server anyone could otherwise copy every user's keys.
@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 
 from paper2md.config import Settings
+from paper2md.models import PREFERENCE_NAMES
 
 PROVIDERS = ("openai", "gyazo")
 
@@ -23,6 +24,13 @@ CREATE TABLE IF NOT EXISTS user_keys (
     api_key    TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id    TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, name)
 );
 """
 
@@ -34,7 +42,7 @@ def _restrict_permissions(path: Path) -> None:
 
 
 class KeyStore:
-    """Async wrapper around a small SQLite table (``<user>_<provider>`` -> key)."""
+    """Async wrapper around two small SQLite tables: ``<user>_<provider>`` -> key, and model choices."""
 
     def __init__(self, path: str | os.PathLike | None = None) -> None:
         self.path = Path(path) if path else Settings.from_env().keystore_path
@@ -48,7 +56,7 @@ class KeyStore:
                 self.path.touch(mode=0o600, exist_ok=True)
                 conn = sqlite3.connect(self.path, check_same_thread=False)
                 conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute(_CREATE_SQL)
+                conn.executescript(_CREATE_SQL)
                 conn.commit()
                 _restrict_permissions(self.path)
                 self._conn = conn
@@ -87,6 +95,39 @@ class KeyStore:
             conn.execute("DELETE FROM user_keys WHERE key_name = ?", (self._name(user_id, provider),))
             conn.commit()
 
+    def _preferences(self, user_id: str) -> dict[str, str]:
+        rows = (
+            self._connect().execute("SELECT name, value FROM user_preferences WHERE user_id = ?", (user_id,)).fetchall()
+        )
+        return {name: value for name, value in rows if name in PREFERENCE_NAMES}
+
+    def _set_preferences(self, user_id: str, values: dict[str, str | None]) -> None:
+        unknown = set(values) - set(PREFERENCE_NAMES)
+        if unknown:
+            raise ValueError(f"Unknown preferences: {sorted(unknown)}")
+        conn = self._connect()
+        with self._lock:
+            for name, value in values.items():
+                if value is None:
+                    conn.execute("DELETE FROM user_preferences WHERE user_id = ? AND name = ?", (user_id, name))
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO user_preferences (user_id, name, value, updated_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id, name) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (user_id, name, value),
+                    )
+            conn.commit()
+        _restrict_permissions(self.path)
+
+    def _clear_preferences(self, user_id: str) -> None:
+        conn = self._connect()
+        with self._lock:
+            conn.execute("DELETE FROM user_preferences WHERE user_id = ?", (user_id,))
+            conn.commit()
+
     async def get(self, user_id: str, provider: str) -> str | None:
         return await asyncio.to_thread(self._get, user_id, provider)
 
@@ -98,3 +139,14 @@ class KeyStore:
 
     async def keys_for(self, user_id: str) -> dict[str, str | None]:
         return {provider: await self.get(user_id, provider) for provider in PROVIDERS}
+
+    async def preferences(self, user_id: str) -> dict[str, str]:
+        """The user's saved model choices (``models.PREFERENCE_NAMES``); missing ones use the server defaults."""
+        return await asyncio.to_thread(self._preferences, user_id)
+
+    async def set_preferences(self, user_id: str, values: dict[str, str | None]) -> None:
+        """Save model choices; a None value deletes that choice."""
+        await asyncio.to_thread(self._set_preferences, user_id, values)
+
+    async def clear_preferences(self, user_id: str) -> None:
+        await asyncio.to_thread(self._clear_preferences, user_id)

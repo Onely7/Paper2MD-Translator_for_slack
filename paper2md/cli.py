@@ -1,7 +1,7 @@
 """
 Command line interface (the Slack bot is started with app.py).
 
-    uv run python -m paper2md translate <PDF file or URL> [--out DIR] [--gyazo]
+    uv run python -m paper2md translate <PDF file or URL> [--out DIR] [--gyazo] [--translation-model M] ...
     uv run python -m paper2md cache list
     uv run python -m paper2md cache show <key>
     uv run python -m paper2md cache remove <key> [<key> ...]
@@ -19,11 +19,13 @@ import logging
 import os
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .cache import PaperCache
 from .config import Settings
+from .models import EFFORT_LEVELS, ModelChoice
 from .pdf import check_limits, fetch_pdf
 from .sources import download_arxiv_pdf, find_paper_ref
 
@@ -46,7 +48,22 @@ def _fetch_source(source: str, pdf_path: Path, settings: Settings) -> None:
 def cmd_translate(args: argparse.Namespace) -> None:
     from .pipeline import translate_paper  # imports torch; keep `cache` commands fast
 
-    settings = Settings.from_env(translation_model=args.translation_model, summary_model=args.summary_model)
+    defaults = Settings.from_env()
+    choice = ModelChoice.resolve(
+        {
+            "translation_model": args.translation_model,
+            "translation_effort": args.translation_effort,
+            "summary_model": args.summary_model,
+            "summary_effort": args.summary_effort,
+        },
+        # any model may be given on the command line, not only the ones offered in Slack
+        replace(
+            defaults,
+            model_choices=(*defaults.model_choices, *filter(None, (args.translation_model, args.summary_model))),
+        ),
+    )
+    settings = choice.apply(defaults)
+    print(f"Models: {choice.describe()}", file=sys.stderr)
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     pdf_path = out / "paper.pdf"
@@ -67,7 +84,8 @@ def cmd_translate(args: argparse.Namespace) -> None:
 
 def cmd_cache_list(args: argparse.Namespace) -> None:
     for entry in PaperCache().entries():
-        print(f"{entry.key}\t{entry.created_date}\t{entry.translation_model}\t{entry.title or entry.display_name}")
+        model = f"{entry.translation_model}/{entry.translation_effort or '-'}"
+        print(f"{entry.key}\t{entry.created_date}\t{model}\t{entry.title or entry.display_name}")
 
 
 def cmd_cache_show(args: argparse.Namespace) -> None:
@@ -109,7 +127,13 @@ def main(argv: list[str] | None = None) -> None:
     translate.add_argument("--out", default="results", help="output directory (default: results)")
     translate.add_argument("--gyazo", action="store_true", help="also write a Markdown with Gyazo image URLs")
     translate.add_argument("--translation-model", help="default: $TRANSLATION_MODEL or gpt-6.1-terra")
+    translate.add_argument(
+        "--translation-effort", choices=EFFORT_LEVELS, help="default: $TRANSLATION_REASONING_EFFORT or none"
+    )
     translate.add_argument("--summary-model", help="default: $SUMMARY_MODEL or gpt-6.1-sol")
+    translate.add_argument(
+        "--summary-effort", choices=EFFORT_LEVELS, help="default: $SUMMARY_REASONING_EFFORT or medium"
+    )
     translate.set_defaults(func=cmd_translate)
 
     cache = commands.add_parser("cache", help="inspect or clean the translation cache").add_subparsers(

@@ -28,6 +28,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from paper2md.cache import CachedPaper, PaperCache
 from paper2md.config import Settings
 from paper2md.llm import InsufficientQuotaError, ModelNotAvailableError
+from paper2md.models import ModelChoice
 from paper2md.options import parse_request_options
 from paper2md.pdf import PdfError, check_limits, fetch_pdf, file_sha256
 from paper2md.pipeline import translate_paper
@@ -112,6 +113,9 @@ class RequestHandler:
         workdir: Path | None = None
         committed = False
         try:
+            # the user's models (Home tab), else the server defaults
+            choice = ModelChoice.resolve(await self.keystore.preferences(user_id), settings)
+            settings = choice.apply(settings)
             if options.no_cache:
                 await say(messages.NO_CACHE_NOTICE)
                 await asyncio.to_thread(purge_stale_workdirs)
@@ -125,7 +129,9 @@ class RequestHandler:
             # 1. identify the paper; answer from the cache without queueing
             paper = await self._identify(client, ref, cache, workdir, settings, use_cache=not options.refresh)
             if paper.cached is not None:
-                await self._deliver_cached(client, channel, thread_ts, paper, paper.cached, include_pdf, workdir)
+                await self._deliver_cached(
+                    client, channel, thread_ts, paper, paper.cached, choice, include_pdf, workdir
+                )
                 return
             await asyncio.to_thread(check_limits, paper.pdf_path, settings.max_pages, settings.max_pdf_mb)
 
@@ -158,8 +164,11 @@ class RequestHandler:
                 if not options.refresh and not options.no_cache:
                     cached = await asyncio.to_thread(cache.find, paper.keys)
                     if cached is not None:
-                        await self._deliver_cached(client, channel, thread_ts, paper, cached, include_pdf, workdir)
+                        await self._deliver_cached(
+                            client, channel, thread_ts, paper, cached, choice, include_pdf, workdir
+                        )
                         return
+                await say(messages.translating_with(choice.describe()))
                 async with self.jobs.slot(client, channel, thread_ts, f"{channel}:{event['ts']}"):
                     result = await asyncio.to_thread(
                         translate_paper,
@@ -248,7 +257,14 @@ class RequestHandler:
 
     @staticmethod
     async def _deliver_cached(
-        client, channel, thread_ts, paper: _Paper, entry: CachedPaper, include_pdf: bool, scratch: Path
+        client,
+        channel,
+        thread_ts,
+        paper: _Paper,
+        entry: CachedPaper,
+        choice: ModelChoice,
+        include_pdf: bool,
+        scratch: Path,
     ) -> None:
         if paper.is_latest_arxiv:
             subject = f"arXiv:{paper.ref.arxiv_id} の最新版（v{paper.arxiv_version}）は"
@@ -256,7 +272,13 @@ class RequestHandler:
             subject = f"arXiv:{entry.display_name} は"
         else:
             subject = "この PDF は"
-        await post(client, channel, thread_ts, messages.cache_hit(subject, entry.created_date, entry.translation_model))
+        cached = ModelChoice(
+            entry.translation_model, entry.translation_effort, entry.summary_model, entry.summary_effort
+        )
+        current = None if cached == choice else choice.describe()
+        await post(
+            client, channel, thread_ts, messages.cache_hit(subject, entry.created_date, cached.describe(), current)
+        )
         await deliver(client, channel, thread_ts, Deliverable.from_entry(entry, include_pdf), scratch)
 
     @staticmethod

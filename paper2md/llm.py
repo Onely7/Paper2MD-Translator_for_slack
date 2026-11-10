@@ -2,7 +2,8 @@
 OpenAI Responses API client (text + images).
 
 Works with GPT-4.x, the o-series and the reasoning families GPT-5.x / GPT-6.x
-(e.g. ``gpt-6.1-sol``, ``gpt-6.1-terra``, ``gpt-6-luna``) and later.  Request
+(e.g. ``gpt-6.1-sol``, ``gpt-6.1-terra``, ``gpt-6-luna``) and later; the
+efforts of the models in ``models.CATALOG`` come from there.  Request
 parameters are adapted per model:
 
 * reasoning models (o-series, GPT-5 and later) get ``reasoning.effort``;
@@ -47,6 +48,8 @@ from openai import (
     RateLimitError,
 )
 
+from .models import CATALOG, coerce_effort, is_reasoning_model, parse_gpt_version
+
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
@@ -66,36 +69,6 @@ class InsufficientQuotaError(RuntimeError):
 # ---------------------------------------------------------------------
 # Model families
 # ---------------------------------------------------------------------
-_GPT_VERSION_RE = re.compile(r"^(?:ft:)?gpt-(\d+)(?:\.(\d+))?(?![\d.])")
-
-
-def parse_gpt_version(model: str) -> tuple[int, int] | None:
-    """
-    >>> parse_gpt_version("gpt-6.1-terra")
-    (6, 1)
-    >>> parse_gpt_version("gpt-5-mini")
-    (5, 0)
-    >>> parse_gpt_version("o3") is None
-    True
-    """
-    match = _GPT_VERSION_RE.match(model.lower())
-    return (int(match.group(1)), int(match.group(2) or 0)) if match else None
-
-
-def is_reasoning_model(model: str) -> bool:
-    """
-    >>> [is_reasoning_model(m) for m in ("gpt-6.1-sol", "gpt-5.4-mini", "o4-mini", "gpt-4.1", "gpt-5-chat-latest")]
-    [True, True, True, False, False]
-    """
-    name = model.lower()
-    if "chat-latest" in name:
-        return False
-    version = parse_gpt_version(name)
-    if version is not None:
-        return version[0] >= 5
-    return bool(re.search(r"(^|[^a-z0-9])o\d+([^a-z0-9]|$)", name))  # o1, o3, o4-mini, ...
-
-
 def supports_verbosity(model: str) -> bool:
     """``text.verbosity`` exists since GPT-5."""
     version = parse_gpt_version(model)
@@ -117,6 +90,8 @@ def normalize_reasoning_effort(model: str, effort: str | None) -> str | None:
     """
     if effort is None:
         return None
+    if any(spec.id == model for spec in CATALOG):
+        return coerce_effort(model, effort)
     name = model.lower()
     version = parse_gpt_version(name)
     if effort == "none":
@@ -124,7 +99,7 @@ def normalize_reasoning_effort(model: str, effort: str | None) -> str | None:
             return "low"  # o-series
         if version == (5, 0):
             return "minimal"
-        if version[0] >= 6 and any(tier in name for tier in ("astra", "sol")):
+        if version[0] >= 6 and ("astra" in name or re.search(r"6\.[1-9]\d*-sol", name)):
             return "low"
     if effort == "minimal" and version is not None and version[0] >= 6:
         return "low"

@@ -84,7 +84,9 @@ class HomeTests(unittest.TestCase):
 
     def test_save_key(self):
         app = FakeApp()
-        keystore = mock.MagicMock(set=mock.AsyncMock(), keys_for=mock.AsyncMock(return_value={}))
+        keystore = mock.MagicMock(
+            set=mock.AsyncMock(), keys_for=mock.AsyncMock(return_value={}), preferences=mock.AsyncMock(return_value={})
+        )
         home.register(app, keystore)
         save = app.listeners["view:save_key"]
 
@@ -112,6 +114,56 @@ class HomeTests(unittest.TestCase):
         keystore.set.assert_awaited_once_with("U1", "openai", "sk-good")
 
 
+def select_options(view, action_id):
+    for block in view["blocks"]:
+        for element in block.get("elements", []):
+            if element.get("action_id") == action_id:
+                return [o["value"] for o in element["options"]], element["initial_option"]["value"]
+    return None
+
+
+class ModelMenuTests(unittest.TestCase):
+    def setUp(self):
+        self.store = KeyStore(Path(tempfile.mkdtemp()) / "keys.db")
+
+    def pick(self, action_id, value):
+        return asyncio.run(home.change_preference(self.store, "U1", action_id, value))
+
+    def saved(self):
+        return asyncio.run(self.store.preferences("U1"))
+
+    def test_menus_offer_only_accepted_efforts(self):
+        view = home.home_view({}, {"translation_model": "gpt-6.1-sol", "translation_effort": "high"})
+        models, current = select_options(view, "pref_translation_model")
+        self.assertEqual(models, ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"])
+        self.assertEqual(current, "gpt-6.1-sol")
+        efforts, effort = select_options(view, "pref_translation_effort")
+        self.assertEqual((efforts, effort), (["low", "medium", "high", "xhigh", "max"], "high"))
+        self.assertIn("pref_reset", str(view))
+        defaults = home.home_view({})
+        self.assertEqual(select_options(defaults, "pref_translation_effort")[0][0], "none")  # Terra accepts none
+        self.assertNotIn("pref_reset", str(defaults))
+
+    def test_switching_model_keeps_an_accepted_effort(self):
+        self.assertIsNone(self.pick("pref_translation_effort", "none"))  # Terra (default) accepts none
+        notice = self.pick("pref_translation_model", "gpt-6-astra")
+        self.assertEqual(self.saved(), {"translation_model": "gpt-6-astra", "translation_effort": "low"})
+        self.assertIn("none を選べないため、low にしました", notice)
+        self.pick("pref_translation_effort", "none")  # not offered for Astra: ignored
+        self.assertEqual(self.saved()["translation_effort"], "low")
+        self.pick("pref_summary_model", "gpt-unknown")  # not offered: ignored
+        self.assertNotIn("summary_model", self.saved())
+
+    def test_reset_listener(self):
+        app = FakeApp()
+        home.register(app, self.store)
+        self.pick("pref_summary_effort", "high")
+        client = mock.MagicMock(views_publish=mock.AsyncMock())
+        asyncio.run(app.listeners["action:pref_reset"](mock.AsyncMock(), {"user": {"id": "U1"}}, client))
+        self.assertEqual(self.saved(), {})
+        client.views_publish.assert_awaited_once()
+
+
 class KeyStoreTests(unittest.TestCase):
     def test_crud_and_permissions(self):
         path = Path(tempfile.mkdtemp()) / "keys.db"
@@ -127,6 +179,14 @@ class KeyStoreTests(unittest.TestCase):
             self.assertEqual(await store.keys_for("U1"), {"openai": "sk-2", "gyazo": None})
             with self.assertRaises(ValueError):
                 await store.get("U1", "gemini")
+            await store.set_preferences("U1", {"translation_model": "gpt-6-astra", "translation_effort": "max"})
+            await store.set_preferences("U1", {"translation_effort": None})
+            self.assertEqual(await store.preferences("U1"), {"translation_model": "gpt-6-astra"})
+            self.assertEqual(await store.preferences("U2"), {})
+            with self.assertRaises(ValueError):
+                await store.set_preferences("U1", {"api_key": "x"})
+            await store.clear_preferences("U1")
+            self.assertEqual(await store.preferences("U1"), {})
 
         asyncio.run(run())
         for candidate in path.parent.iterdir():

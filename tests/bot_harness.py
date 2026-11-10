@@ -29,11 +29,15 @@ def pdf_bytes(label: str) -> bytes:
 
 
 class FakeKeyStore:
-    def __init__(self, keys):
+    def __init__(self, keys, preferences=None):
         self.keys = dict(keys)
+        self.saved_preferences = dict(preferences or {})
 
     async def get(self, user_id, provider):
         return self.keys.get(provider)
+
+    async def preferences(self, user_id):
+        return dict(self.saved_preferences)
 
 
 class BotHarness:
@@ -51,7 +55,7 @@ class BotHarness:
         self.pipeline_delay = 0.0
         self.pipeline_error: Exception | None = None
         self.failed_segments = 0
-        self.translation_model = "gpt-6.1-terra"
+        self.pipeline_settings = []  # the Settings each pipeline run got
         self.arxiv_latest = {"2408.03326": 3}
         self.resolve_fails = False
         self.slack_files: dict[str, bytes] = {}
@@ -106,6 +110,7 @@ class BotHarness:
 
     def _pipeline(self, pdf_path, workdir, *, openai_api_key, gyazo_token, settings, progress):
         self.pipeline_calls += 1
+        self.pipeline_settings.append(settings)
         if self.pipeline_delay:
             time.sleep(self.pipeline_delay)
         out = Path(workdir) / "output"
@@ -132,8 +137,10 @@ class BotHarness:
             gyazo_markdown_path=gyazo,
             title="Paper Title",
             failed_segments=self.failed_segments,
-            translation_model=self.translation_model,
-            summary_model="gpt-6.1-sol",
+            translation_model=settings.translation_model,
+            translation_effort=settings.translation_effort,
+            summary_model=settings.summary_model,
+            summary_effort=settings.summary_effort,
         )
 
     # ---- helpers -------------------------------------------------------
@@ -143,8 +150,8 @@ class BotHarness:
             event["files"] = files
         return event
 
-    def run(self, text, files=None, keys=KEYS, ts="100.0"):
-        handler = RequestHandler(FakeKeyStore(keys))
+    def run(self, text, files=None, keys=KEYS, ts="100.0", preferences=None):
+        handler = RequestHandler(FakeKeyStore(keys, preferences))
         asyncio.run(handler.handle(self.client, self.event(text, files, ts), "U1"))
 
     def entries(self):

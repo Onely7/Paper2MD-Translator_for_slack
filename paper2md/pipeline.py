@@ -43,7 +43,9 @@ class PaperResult:
     failed_segments: int = 0  # translations that failed (the result is not cached)
     gyazo_failures: int = 0  # figures not uploaded to Gyazo (still in figures/)
     translation_model: str = ""
+    translation_effort: str | None = None
     summary_model: str = ""
+    summary_effort: str | None = None
 
 
 def _assemble(count: int, parts: dict[int, str], figures: dict[int, str]) -> str:
@@ -129,5 +131,7 @@ def translate_paper(
         failed_segments=failed,
         gyazo_failures=gyazo_failures,
         translation_model=settings.translation_model,
+        translation_effort=settings.translation_effort,
         summary_model=settings.summary_model,
+        summary_effort=settings.summary_effort,
     )

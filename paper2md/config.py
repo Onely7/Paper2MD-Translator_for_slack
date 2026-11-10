@@ -12,6 +12,8 @@ import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
+from .models import DEFAULT_MODEL_CHOICES
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_TRANSLATION_MODEL = "gpt-6.1-terra"
@@ -35,6 +37,12 @@ def _bool(name: str, default: bool = False) -> bool:
     return default if value is None else value.lower() in {"1", "true", "yes", "on"}
 
 
+def _list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = _str(name, None)
+    items = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip())) if value else ()
+    return items or default
+
+
 def _path(name: str, default: str) -> Path:
     path = Path(_str(name, default)).expanduser()
     return path if path.is_absolute() else REPO_ROOT / path
@@ -50,8 +58,9 @@ class Settings:
     # OpenAI
     translation_model: str = DEFAULT_TRANSLATION_MODEL
     summary_model: str = DEFAULT_SUMMARY_MODEL
-    translation_effort: str = "none"
-    summary_effort: str = "medium"
+    translation_effort: str | None = "none"
+    summary_effort: str | None = "medium"
+    model_choices: tuple[str, ...] = DEFAULT_MODEL_CHOICES  # offered in the Slack Home tab
     image_detail: str = "auto"
     openai_max_concurrency: int = 8
     # PDF
@@ -81,6 +90,7 @@ class Settings:
             summary_model=_str("SUMMARY_MODEL", DEFAULT_SUMMARY_MODEL),
             translation_effort=_str("TRANSLATION_REASONING_EFFORT", "none"),
             summary_effort=_str("SUMMARY_REASONING_EFFORT", "medium"),
+            model_choices=_list("OPENAI_MODEL_CHOICES", DEFAULT_MODEL_CHOICES),
             image_detail=_str("TRANSLATION_IMAGE_DETAIL", "auto"),
             openai_max_concurrency=_int("OPENAI_MAX_CONCURRENCY", 8),
             page_resolution=_int("PAGE_RESOLUTION", 4000, minimum=1000),

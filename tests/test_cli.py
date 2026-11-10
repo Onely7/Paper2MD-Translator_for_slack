@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from paper2md.cache import PaperCache
+from paper2md.cache import CACHE_FORMAT_VERSION, PaperCache
 from paper2md.cli import main
 
 
@@ -19,12 +19,13 @@ def add_entry(cache: PaperCache, key: str, created_at: str) -> None:
     (staging / "paper.md").write_text("# T")
     (staging / "summary.md").write_text("s")
     manifest = {
-        "format_version": 2,
+        "format_version": CACHE_FORMAT_VERSION,
         "key": key,
         "aliases": [],
         "created_at": created_at,
         "title": "T",
         "translation_model": "gpt-6.1-terra",
+        "translation_effort": "none",
         "files": {"pdf": "paper.pdf", "markdown": "paper.md", "summary": "summary.md", "figures": []},
     }
     (staging / "manifest.json").write_text(json.dumps(manifest))
@@ -49,7 +50,7 @@ class CacheCommandTests(unittest.TestCase):
 
     def test_list_show_remove_prune(self):
         listing = self.run_cli("cache", "list")
-        self.assertIn("arxiv:1111.11111v1\t2020-01-01\tgpt-6.1-terra\tT", listing)
+        self.assertIn("arxiv:1111.11111v1\t2020-01-01\tgpt-6.1-terra/none\tT", listing)
         self.assertIn('"key": "arxiv:2222.22222v1"', self.run_cli("cache", "show", "arxiv:2222.22222v1"))
         self.assertIn("removed arxiv:1111.11111v1", self.run_cli("cache", "prune", "--older-than", "30"))
         self.assertEqual([e.key for e in self.cache.entries()], ["arxiv:2222.22222v1"])
