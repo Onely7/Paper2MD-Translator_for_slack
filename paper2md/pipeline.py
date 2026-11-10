@@ -7,6 +7,7 @@ PDF -> Japanese Markdown + summary.
         segments.jsonl             segments and their translations (for debugging)
         output/
             paper.md               Markdown; figures linked as figures/figNN.png
+                                   (title, headings and references copied from the PDF)
             paper.gyazo.md         the same with Gyazo image URLs (with a Gyazo token)
             figures/figNN.png
             summary.md
@@ -22,11 +23,12 @@ from pathlib import Path
 from .config import Settings
 from .document import parse_pages
 from .figures import export_figures, img_tag, upload_all_to_gyazo
-from .layout import TEXT_LABELS, build_segments, crop_segments
+from .layout import TEXT_LABELS, attach_printed_text, build_segments, crop_segments
 from .llm import OpenAIClient
 from .markdown import finalize_markdown, first_heading
 from .pdf import PdfError, render_pages
 from .progress import ProgressFactory, console_progress
+from .textlayer import TextLayer
 from .translation import summarize, translate_segments
 
 logger = logging.getLogger(__name__)
@@ -70,19 +72,27 @@ def translate_paper(
     output_dir = workdir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Layout analysis (pages are rendered once and shared by every stage)
+    # 1. Layout analysis (pages are rendered once and shared by every stage).
+    #    Dolphin reads text only on pages without a text layer (scans).
     pages = render_pages(pdf_path, settings.page_resolution)
     if len(pages) > settings.max_pages:
         raise PdfError(f"ページ数が多すぎます（{len(pages)} ページ、上限 {settings.max_pages} ページ）。")
-    with progress(len(pages), "ページ内要素 解析中") as bar:
-        recognition = parse_pages(
-            pages,
-            workdir / "dolphin",
-            settings=settings,
-            recognize_labels=TEXT_LABELS,
-            on_page_done=lambda: bar.update(1),
-        )
-    segments = build_segments(recognition, page_height=max(page.height for page in pages))
+    with TextLayer(pdf_path, settings.page_resolution) as layer:
+        with progress(len(pages), "ページ内要素 解析中") as bar:
+            recognition = parse_pages(
+                pages,
+                workdir / "dolphin",
+                settings=settings,
+                recognize_labels=TEXT_LABELS,
+                ocr_pages=[i for i in range(len(pages)) if not layer.usable(i)],
+                on_page_done=lambda: bar.update(1),
+            )
+
+        def text_of(element: dict) -> str:
+            return layer.text(element["page"], element["bbox"]) or element["text"]
+
+        segments = build_segments(recognition, page_height=max(page.height for page in pages), text_of=text_of)
+        attach_printed_text(segments, layer)
     crop_segments(segments, pages, workdir / "crops")
     del pages
 

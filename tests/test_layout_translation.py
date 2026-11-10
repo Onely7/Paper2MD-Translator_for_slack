@@ -1,4 +1,4 @@
-"""Layout grouping (Dolphin-v2 output -> segments) and segment translation."""
+"""Layout grouping (Dolphin-v2 output -> segments), printed text and segment translation."""
 
 import unittest
 
@@ -6,7 +6,7 @@ import openai
 
 from paper2md import prompts
 from paper2md.config import Settings
-from paper2md.layout import build_segments, normalize_label
+from paper2md.layout import attach_printed_text, build_segments, normalize_label
 from paper2md.llm import InsufficientQuotaError
 from paper2md.translation import translate_segments
 
@@ -35,6 +35,7 @@ RECOGNITION = {
                 el("fnote", [500, 3700, 2500, 3750], 12),
                 el("foot", [1500, 3800, 1600, 3850], 13, tags=["page_num"]),
                 el("watermark", [50, 1000, 150, 2800], 14, tags=["meta_num"]),
+                el("para", [20, 1000, 80, 2800], 15, tags=["meta_num", "meta_pub_date"]),  # arXiv stamp as para
             ]
         },
         {
@@ -43,45 +44,89 @@ RECOGNITION = {
                 el("sec_1", [500, 500, 900, 560], 1, "References"),
                 el("reference", [500, 600, 2500, 700], 2, "[1] A. Author. Paper one. 2020."),
                 el("reference", [500, 720, 2500, 820], 3, "[2] B. Author. Paper two. 2021."),
-                el("catalogue", [500, 900, 2500, 3500], 4, "[3] C. Author. Paper three. 2022."),
+                el("catalogue", [500, 900, 2500, 3500], 4, "[3] C. Author. Paper three.\n2022."),
             ]
         },
     ]
 }
+KINDS = [
+    ("title", ["title"]),
+    ("text", ["para"]),  # content above the title is kept, after it
+    ("text", ["author"]),
+    ("heading", ["sec"]),  # Abstract
+    ("text", ["para"]),
+    ("heading", ["sec"]),  # 1 Introduction
+    ("text", ["para", "equ", "para", "para"]),  # around the figure and onto page 2
+    ("figure", ["fig"]),
+    ("text", ["cap"]),
+    ("text", ["fnote"]),
+    ("heading", ["sec"]),  # References
+    ("reference", ["reference", "reference", "reference"]),  # the catalogue is part of the list
+]
+
+
+def segments_with_text():
+    segments = build_segments(RECOGNITION, page_height=4000)
+    attach_printed_text(segments, layer=None)  # no PDF: Dolphin's text is used
+    return segments
 
 
 class LayoutTests(unittest.TestCase):
     def setUp(self):
-        self.segments = build_segments(RECOGNITION, page_height=4000)
+        self.segments = segments_with_text()
 
     def test_labels(self):
         self.assertEqual(normalize_label("sec_0"), "title")
         self.assertEqual(normalize_label("para", ["author"]), "author")
         self.assertIsNone(normalize_label("watermark"))
+        self.assertIsNone(normalize_label("para", ["meta_num"]))
         self.assertEqual(normalize_label("something_new"), "para")
 
     def test_order_and_kinds(self):
-        kinds = [(s.kind, s.labels) for s in self.segments]
-        self.assertEqual(kinds[0], ("title", ["title"]))
-        self.assertEqual(kinds[1], ("text", ["para"]))  # content above the title is kept, after it
-        self.assertEqual(kinds[2], ("text", ["author"]))
-        self.assertEqual(kinds[3], ("text", ["sec", "para"]))  # Abstract heading + text
-        # the introduction is one segment around its figure and onto page 2; the figure follows it
-        intro = kinds[4]
-        self.assertEqual(intro, ("text", ["sec", "para", "equ", "para", "para"]))
-        self.assertEqual(self.segments[4].pages, [0, 0, 1])
-        self.assertEqual([k[0] for k in kinds[5:8]], ["figure", "text", "text"])  # figure, caption, footnote
-        self.assertEqual(kinds[8][0], "reference")
-        self.assertEqual(len(kinds), 9)
+        self.assertEqual([(s.kind, s.labels) for s in self.segments], KINDS)
+        self.assertEqual(self.segments[6].pages, [0, 0, 1])
 
     def test_figure_includes_its_caption(self):
-        figure = self.segments[5]
-        self.assertGreaterEqual(figure.bboxes[0][3], 2960)
+        self.assertGreaterEqual(self.segments[7].bboxes[0][3], 2960)
 
-    def test_reference_text(self):
-        reference = self.segments[8]
-        self.assertTrue(reference.has_all_texts)
-        self.assertIn("[3] C. Author", reference.text)
+    def test_printed_text(self):
+        self.assertEqual(
+            [s.source_text for s in self.segments if s.kind in ("title", "heading")],
+            ["Attention Is All You Need", "Abstract", "1 Introduction", "References"],
+        )
+        self.assertEqual(
+            self.segments[11].entries,
+            ["[1] A. Author. Paper one. 2020.", "[2] B. Author. Paper two. 2021.", "[3] C. Author. Paper three. 2022."],
+        )
+        # the reference segment knows the other boxes of its page (to skip them in the PDF text)
+        self.assertIn([500, 500, 900, 560], self.segments[11].exclude[1])
+
+    def test_paragraph_after_references_is_translated(self):
+        pages = [{"elements": [*RECOGNITION["pages"][1]["elements"], el("para", [500, 3600, 2500, 3900], 5, "")]}]
+        pages[0]["elements"][-1]["text"] = "We thank the reviewers for their helpful comments and suggestions."
+        kinds = [s.kind for s in build_segments({"pages": pages}, page_height=4000)]
+        self.assertEqual(kinds, ["text", "heading", "reference", "text"])
+
+    def test_long_heading_is_translated(self):
+        recognition = {"pages": [{"elements": [el("sec_1", [500, 500, 2500, 900], 0, "word " * 60)]}]}
+        segments = build_segments(recognition)
+        attach_printed_text(segments, layer=None)
+        self.assertEqual((segments[0].kind, segments[0].source_text), ("text", ""))
+
+    def test_title_on_two_elements(self):
+        recognition = {
+            "pages": [
+                {
+                    "elements": [
+                        el("sec_0", [500, 100, 2500, 200], 0, "LLaVA:"),
+                        el("sec_0", [500, 210, 2500, 300], 1, "## Visual Instruction Tuning∗"),
+                    ]
+                }
+            ]
+        }
+        segments = build_segments(recognition)
+        attach_printed_text(segments, layer=None)
+        self.assertEqual([(s.kind, s.source_text) for s in segments], [("title", "LLaVA: Visual Instruction Tuning")])
 
     def test_thresholds_scale_with_resolution(self):
         half = {
@@ -104,12 +149,7 @@ class FakeClient:
             self.requests.append(request)
             result = self.answer(request) if self.answer else None
             if result is None:
-                if "refine the given title" in request["text"]:
-                    result = "# Attention Is All You Need"
-                elif "reference entries" in request["text"]:
-                    result = "## Reference\n- [1]"
-                else:
-                    result = "```markdown\n翻訳\n```"
+                result = "```markdown\n翻訳\n```"
             if on_result:
                 on_result(i, result)
             results.append(result)
@@ -118,7 +158,7 @@ class FakeClient:
 
 class TranslationTests(unittest.TestCase):
     def setUp(self):
-        self.segments = build_segments(RECOGNITION, page_height=4000)
+        self.segments = segments_with_text()
         for i, segment in enumerate(self.segments):
             segment.images = [f"/tmp/crop_{i}.png"]
         self.settings = Settings(translation_model="gpt-6.1-terra")
@@ -127,37 +167,56 @@ class TranslationTests(unittest.TestCase):
         fake = FakeClient()
         parts, failed = translate_segments(self.segments, fake, self.settings)
         self.assertEqual(failed, 0)
-        self.assertEqual(len(fake.requests), 8)  # everything but the figure
+        self.assertEqual(len(fake.requests), 6)  # text only: title, headings and references are printed
         self.assertEqual(parts[0], "# Attention Is All You Need")
         self.assertEqual(parts[1], "翻訳")  # the ```markdown fence is removed
-        self.assertNotIn(5, parts)  # the figure
-        translation = next(r for r in fake.requests if r.get("instructions"))
+        self.assertEqual((parts[3], parts[5], parts[10]), ("## Abstract", "## 1 Introduction", "## References"))
+        self.assertEqual(parts[11].splitlines()[0], "- [1] A. Author. Paper one. 2020.")
+        self.assertNotIn(7, parts)  # the figure
+        translation = fake.requests[-1]
         self.assertEqual(translation["instructions"], prompts.TRANSLATION_INSTRUCTIONS)
         self.assertEqual(translation["gen_kwargs"]["reasoning_effort"], "none")
+        intro = fake.requests[3]["text"]  # the introduction: the paper title and its section are given
+        self.assertIn("論文: Attention Is All You Need", intro)
+        self.assertIn("節: 1 Introduction", intro)
+        self.assertNotIn("節:", fake.requests[0]["text"])  # the notice above the first heading
 
     def test_failures_are_marked(self):
         error = openai.APIConnectionError(request=None)
-        fake = FakeClient(lambda r: error if r.get("instructions") else None)
+        fake = FakeClient(lambda r: error)
         parts, failed = translate_segments(self.segments, fake, self.settings)
         self.assertEqual(failed, 6)
         self.assertIn("翻訳に失敗しました", parts[1])
+        self.assertEqual(parts[0], "# Attention Is All You Need")
 
     def test_fatal_error_aborts(self):
         fake = FakeClient(lambda r: InsufficientQuotaError("quota"))
         with self.assertRaises(InsufficientQuotaError):
             translate_segments(self.segments, fake, self.settings)
 
-    def test_untranslatable_answer_is_dropped(self):
-        sentence = f"申し訳ありません。{prompts.UNTRANSLATABLE_SENTINEL}。"
-        fake = FakeClient(lambda r: sentence if r.get("instructions") else None)
+    def test_empty_answer_is_dropped(self):
+        fake = FakeClient(lambda r: f" {prompts.EMPTY_MARKER}\n")
         parts, failed = translate_segments(self.segments, fake, self.settings)
         self.assertEqual((failed, parts[1]), (0, ""))
 
-    def test_reference_without_text_is_read_from_images(self):
-        self.segments[8].texts[-1] = ""
-        fake = FakeClient()
-        translate_segments(self.segments, fake, self.settings)
-        self.assertTrue(any("show the reference list" in r["text"] for r in fake.requests))
+    def test_unreadable_text_is_transcribed_not_translated(self):
+        self.segments[0].source_text = ""
+        self.segments[5].source_text = ""
+        self.segments[11].entries = []
+        answers = {
+            prompts.TITLE_TRANSCRIPTION: "# Attention Is All You Need",
+            prompts.HEADING_TRANSCRIPTION: "1 Introduction",
+            prompts.REFERENCE_TRANSCRIPTION: "## References\n- [1] A. Author. Paper one. 2020.",
+        }
+        fake = FakeClient(lambda r: answers.get(r["text"]))
+        parts, _ = translate_segments(self.segments, fake, self.settings)
+        transcriptions = [r for r in fake.requests if r["text"] in answers]
+        self.assertEqual(len(transcriptions), 3)
+        self.assertTrue(all("instructions" not in r for r in transcriptions))  # not the translation prompt
+        self.assertEqual({r["gen_kwargs"]["reasoning_effort"] for r in transcriptions}, {"none"})
+        self.assertEqual(parts[0], "# Attention Is All You Need")
+        self.assertEqual(parts[5], "## 1 Introduction")
+        self.assertEqual(parts[11], "- [1] A. Author. Paper one. 2020.")  # its heading is a segment of its own
 
 
 if __name__ == "__main__":

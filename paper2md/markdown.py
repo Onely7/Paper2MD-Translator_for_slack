@@ -13,12 +13,9 @@ Post-processing of the translated Markdown and the Slack summary.
 2. Math and code are swapped for placeholders, because mdformat escapes their
    characters (``\\max`` -> ``\\\\max``, ``*`` -> ``\\*``) and would break the LaTeX.
 3. mdformat normalizes the Markdown, and only heading lines are adjusted:
-
-   * numbered headings get the level of their numbering
-     (``2`` -> ``##``, ``2.1`` -> ``###``, ``2.1.3`` -> ``####``),
-   * Abstract / References / Appendix / Acknowledgments become ``##``,
-   * a line made only of a bold numbered heading (``**3.1 Training**``) becomes a
-     heading; when text follows it, the text stays a separate paragraph.
+   numbered headings get the level of their numbering (``2`` -> ``##``,
+   ``2.1`` -> ``###``, ``2.1.3`` -> ``####``) and Abstract / References /
+   Appendix / Acknowledgments become ``##``; the heading text is kept as printed.
 
 The title (``#``) and all other lines (paragraphs, lists, code) are left alone.
 """
@@ -37,16 +34,16 @@ _INLINE_CODE_RE = re.compile(r"(`+)(?!`).+?(?<!`)\1")
 _INLINE_MATH_RE = re.compile(r"(?<![\\$])\$(?=\S)(?:[^$\n\\]|\\.)+?(?<=\S)\$(?!\$)")
 
 _KEYWORDS = {
-    "abstract": "Abstract",
-    "reference": "Reference",
-    "references": "References",
-    "bibliography": "Bibliography",
-    "appendix": "Appendix",
-    "appendices": "Appendices",
-    "acknowledgment": "Acknowledgment",
-    "acknowledgments": "Acknowledgments",
-    "acknowledgement": "Acknowledgement",
-    "acknowledgements": "Acknowledgements",
+    "abstract",
+    "reference",
+    "references",
+    "bibliography",
+    "appendix",
+    "appendices",
+    "acknowledgment",
+    "acknowledgments",
+    "acknowledgement",
+    "acknowledgements",
 }
 # 2 / 2.1 / 2.1.3 / 2.1.3.4, A.1 / A.1.2, A. / II.  (a lone letter or numeral needs a dot)
 _SECTION_NUMBER_RE = re.compile(
@@ -195,17 +192,15 @@ def normalize_math(markdown: str) -> str:
 # Headings
 # ---------------------------------------------------------------------------
 def _heading_for(text: str) -> str | None:
-    """Normalized heading line for a heading text, or None to leave it unchanged."""
+    """Heading line at the level of its numbering or keyword, or None to leave it unchanged."""
     text = re.sub(r"^(\*\*|__)(.+)\1$", r"\2", text.strip()).strip()
-    keyword = _KEYWORDS.get(text.rstrip(":.").lower())
-    if keyword:
-        return f"## {keyword}"
+    if text.rstrip(":.").lower() in _KEYWORDS:
+        return f"## {text}"
     match = _SECTION_NUMBER_RE.match(text)
     if not match:
         return None
-    number = match["num"].rstrip(".")
-    depth = number.count(".") + 1
-    return f"{'#' * min(depth + 1, 6)} {number}. {match['title'].strip()}"
+    depth = match["num"].rstrip(".").count(".") + 1
+    return f"{'#' * min(depth + 1, 6)} {text}"
 
 
 def normalize_headings(markdown: str) -> str:
@@ -255,11 +250,40 @@ def finalize_markdown(markdown: str) -> str:
     return _restore(formatted, saved).strip() + "\n"
 
 
+def reference_list(entries: list[str]) -> str:
+    r"""
+    The reference entries as a Markdown list, each exactly as printed.
+
+    >>> print(reference_list(["[1] A. Author. Title. 2020.", "2. B. Author. Title."]))
+    - [1] A. Author. Title. 2020.
+    - 2\. B. Author. Title.
+    """
+    items = []
+    for entry in entries:
+        entry = " ".join(entry.split())
+        entry = re.sub(r"^(\d+)([.)])(\s)", r"\1\\\2\3", entry)  # not a nested ordered list
+        entry = re.sub(r"^([#>+\-*])", r"\\\1", entry)
+        items.append(f"- {entry}")
+    return "\n".join(items)
+
+
 def first_heading(markdown: str) -> str | None:
     for line in markdown.splitlines():
         if line.startswith("# "):
             return line[2:].strip() or None
     return None
+
+
+def text_for_summary(markdown: str) -> str:
+    """The translated paper without figure tags and the reference list (they add nothing to a summary)."""
+    lines, skipping = [], False
+    for line in markdown.splitlines():
+        heading = _HEADING_RE.match(line)
+        if heading and len(heading["hashes"]) <= 2:
+            skipping = heading["text"].strip().rstrip(":.").lower() in ("references", "reference", "bibliography")
+        if not skipping and not line.lstrip().startswith("<img "):
+            lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
 
 
 # ---------------------------------------------------------------------------

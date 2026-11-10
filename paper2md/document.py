@@ -10,8 +10,8 @@ module adds what the application needs on top of it:
   (``_patch_qwen2_5_vl_vision_attention``),
 * one model shared by concurrent jobs, with GPU inference serialized and the
   GPU memory released when no job needs the model,
-* reading the text only of the labels the pipeline uses (stage 2 dominates
-  Dolphin's run time).
+* reading the text only of the labels the pipeline uses, and only on pages
+  without a text layer (stage 2 dominates Dolphin's run time).
 """
 
 from __future__ import annotations
@@ -276,6 +276,7 @@ def parse_pages(
     *,
     settings: Settings | None = None,
     recognize_labels: Collection[str] | None = None,
+    ocr_pages: Collection[int] | None = None,
     on_page_done: Callable[[], None] | None = None,
 ) -> dict:
     """Run Dolphin-v2 on rendered pages and write ``out_dir/recognition.json``.
@@ -284,6 +285,9 @@ def parse_pages(
         recognize_labels: labels whose text is read; ``None`` reads every
             element like upstream.  ``DOLPHIN_RECOGNIZE_LABELS`` overrides it
             ("all" or a comma-separated list).
+        ocr_pages: indices of the pages whose text is read (``None``: all);
+            on the others only the layout is analysed.  Ignored when
+            ``DOLPHIN_RECOGNIZE_LABELS`` is set.
         on_page_done: called after each page (e.g. to advance a progress bar).
 
     Returns:
@@ -294,6 +298,7 @@ def parse_pages(
     override = settings.dolphin_recognize_labels
     if override:
         recognize_labels = None if override.lower() == "all" else {s.strip() for s in override.split(",") if s.strip()}
+        ocr_pages = None
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if recognize_labels is None:  # upstream saves figure crops here
@@ -303,14 +308,13 @@ def parse_pages(
     with model_manager.use(settings) as model:
         for index, image in enumerate(images):
             layout = model.chat(LAYOUT_PROMPT, image)
-            if recognize_labels is None:
+            labels = recognize_labels if ocr_pages is None or index in ocr_pages else ()
+            if labels is None:
                 elements = process_elements(
                     layout, image, model, settings.dolphin_max_batch_size, str(out_dir), f"page_{index + 1:03d}"
                 )
             else:
-                elements = process_elements_selective(
-                    layout, image, model, settings.dolphin_max_batch_size, recognize_labels
-                )
+                elements = process_elements_selective(layout, image, model, settings.dolphin_max_batch_size, labels)
             pages.append({"page_number": index + 1, "elements": elements})
             if on_page_done is not None:
                 on_page_done()

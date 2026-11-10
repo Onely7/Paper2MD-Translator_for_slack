@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # avoid importing torch for cache-only use (e.g. the CLI)
 
 logger = logging.getLogger(__name__)
 
-CACHE_FORMAT_VERSION = 3  # 3: the manifest records the reasoning efforts
+CACHE_FORMAT_VERSION = 3  # 3: models with their reasoning efforts; references and headings as printed
 _ENTRY_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 

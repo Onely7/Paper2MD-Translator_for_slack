@@ -1,30 +1,38 @@
 """
-Turn Dolphin-v2 layout elements into translation segments.
+Turn Dolphin-v2 layout elements into segments.
 
 1. Normalize the labels (Dolphin-v2 names -> the vocabulary below) and drop
-   page furniture (running headers, page numbers, arXiv stamps).
+   page furniture (running headers, page numbers, the arXiv stamp).
 2. Split the document into blocks at headings.  Elements before the first
    heading (e.g. a notice above the title) form a block right after the title.
-3. Order each block: title, text (headings, paragraphs, lists, formulas, code,
-   references), then figures/tables/captions, then footnotes.
-4. Merge consecutive text elements of a block into one region unless a large
+3. In a block under a "References" heading, the elements that look like
+   reference entries become ``reference`` elements.
+4. Order each block: heading, text (paragraphs, lists, formulas, code),
+   then figures/tables/captions, then footnotes.
+5. Merge consecutive text elements of a block into one region unless a large
    vertical gap separates them (a column or page change).
-5. Join regions that continue across columns/pages (a paragraph, the reference
+6. Join regions that continue across columns/pages (a paragraph, the reference
    list) into one segment with several crops.
-6. Let a figure/table crop include the caption right after it.
+7. Let a figure/table crop include the caption right after it.
 
-Paragraphs, lists, formulas and captions are translated from the cropped
-images.  Dolphin's text is used only for the title and the references
-(``TEXT_LABELS``).
+Segment kinds:
+
+* ``title`` / ``heading``: copied from the PDF in English (``source_text``),
+* ``text``: translated from the cropped images,
+* ``reference``: the entries copied from the PDF in English (``entries``),
+* ``figure``: embedded as an image.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from PIL import Image
+
+from .textlayer import TextLayer, clean_title, join_lines, reference_entries, split_ocr_reference_entries
 
 # Dolphin-v2 label -> label used below (Dolphin 1.x names)
 DOLPHIN_LABEL_MAP = {
@@ -49,20 +57,26 @@ DOLPHIN_LABEL_MAP = {
     "fnote": "fnote",
 }
 DROPPED_LABELS = frozenset({"header", "foot", "watermark"})
+META_TAGS = frozenset({"meta_num", "meta_pub_date"})  # the arXiv stamp in the margin, dates
 AUTHOR_TAGS = frozenset({"author", "author_affili", "author_mail"})
-# Dolphin labels whose text is read: the title, headings (to find the
-# reference section) and the reference entries.
+# Labels whose text Dolphin reads on pages without a text layer (scans): the
+# title, the headings and the reference entries.
 TEXT_LABELS = frozenset({"sec_0", "sec_1", "sec_2", "sec_3", "sec_4", "sec_5", "reference", "catalogue"})
 
-BLOCK_START_LABELS = ("title", "author", "sec", "sub_sec", "sub_sub_sec")
-TEXT_FLOW_LABELS = ("author", "sec", "sub_sec", "sub_sub_sec", "para", "list", "equ", "code", "reference")
+HEADING_LEVELS = {"sec": 2, "sub_sec": 3, "sub_sub_sec": 4}
+BLOCK_START_LABELS = ("title", "author", *HEADING_LEVELS)
+TEXT_FLOW_LABELS = ("author", "para", "list", "equ", "code")
 FIGURE_LABELS = ("fig", "tab", "cap")
 FOOTNOTE_LABELS = ("fnote",)
-CONTINUATION_LABELS = ("para", "list", "equ", "code", "reference")
-_KNOWN_LABELS = frozenset(("title", *TEXT_FLOW_LABELS, *FIGURE_LABELS, *FOOTNOTE_LABELS))
+CONTINUATION_LABELS = ("para", "list", "equ", "code")
+_KNOWN_LABELS = frozenset(("title", *HEADING_LEVELS, *TEXT_FLOW_LABELS, "reference", *FIGURE_LABELS, *FOOTNOTE_LABELS))
 
-REFERENCE_HEADING_RE = re.compile(r"(references?|bibliography)\b", re.IGNORECASE)
+REFERENCE_HEADING_RE = re.compile(
+    r"^(?:[A-Z0-9]{1,3}(?:\.\d{1,2})*\.?\s+)?(references?|bibliography|literature cited|works cited)\b", re.IGNORECASE
+)
 REFERENCE_PAGE_HEIGHT = 4000  # pixel thresholds below are tuned for pages rendered at this height
+
+TextOf = Callable[[dict], str]
 
 
 def normalize_label(label: str, tags: list[str] | None = None) -> str | None:
@@ -75,34 +89,60 @@ def normalize_label(label: str, tags: list[str] | None = None) -> str | None:
     'author'
     >>> normalize_label("foot", ["page_num"]) is None
     True
+    >>> normalize_label("para", ["meta_num", "meta_pub_date"]) is None   # the arXiv stamp
+    True
     """
     if label in DROPPED_LABELS:
         return None
     mapped = DOLPHIN_LABEL_MAP.get(label, label if label in _KNOWN_LABELS else "para")
-    if mapped in ("para", "fnote") and AUTHOR_TAGS.intersection(tags or ()):
+    tags = set(tags or ())
+    if mapped in ("para", "fnote") and META_TAGS & tags:
+        return None
+    if mapped in ("para", "fnote") and AUTHOR_TAGS & tags:
         return "author"
     return mapped
 
 
+def looks_like_references(text: str) -> bool:
+    """
+    Whether a text is part of a reference list (years, "[12]" labels, venues).
+
+    >>> looks_like_references("[1] A. Author. A title. In NeurIPS, 2020.")
+    True
+    >>> looks_like_references("We thank the reviewers for their comments and the funding agencies.")
+    False
+    """
+    lines = [line for line in text.splitlines() if line.strip()] or [text]
+    hits = len(re.findall(r"\b(?:19|20)\d{2}[a-z]?\b", text))
+    hits += len(re.findall(r"(?m)^\s*\[\w{1,8}\]", text))
+    hits += len(re.findall(r"\bet al\.|\bProceedings\b|\barXiv\b|\bJournal\b|\bConference\b|\bpp?\.\s*\d", text))
+    return hits >= max(1.0, 0.25 * len(lines))
+
+
 @dataclass
 class Segment:
-    """A unit sent to the translation model (or embedded as an image)."""
+    """A unit of the document: translated, copied from the PDF, or embedded as an image."""
 
-    kind: str  # "title" | "text" | "reference" | "figure"
+    kind: str  # "title" | "heading" | "text" | "reference" | "figure"
     first_label: str
     labels: list[str]
-    bboxes: list[list[int]]
+    bboxes: list[list[int]]  # crop regions
     pages: list[int]
-    texts: list[str]  # Dolphin text of each element ("" when not read)
-    images: list[str] = field(default_factory=list)  # crop of each bbox
+    texts: list[str]  # Dolphin's text of each element ("" when not read)
+    elements: list[dict] = field(default_factory=list)  # {"label", "bbox", "page"} of each element
+    exclude: dict[int, list[list[int]]] = field(default_factory=dict)  # references: other boxes of their pages
+    images: list[str] = field(default_factory=list)  # crop of each region
+    source_text: str = ""  # title / heading as printed
+    entries: list[str] = field(default_factory=list)  # reference entries as printed
 
     @property
     def text(self) -> str:
         return "\n".join(t for t in self.texts if t)
 
     @property
-    def has_all_texts(self) -> bool:
-        return all(t.strip() for t in self.texts)
+    def level(self) -> int:
+        """Markdown heading level (1 for the title)."""
+        return 1 if self.kind == "title" else HEADING_LEVELS.get(self.first_label, 2)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -111,17 +151,23 @@ class Segment:
 # ---------------------------------------------------------------------------
 # Building segments
 # ---------------------------------------------------------------------------
-def _flatten(recognition: dict) -> list[dict]:
-    elements = []
+def _flatten(recognition: dict) -> tuple[list[dict], dict[int, list[dict]]]:
+    """(kept elements in reading order, every element of each page)."""
+    elements: list[dict] = []
+    every: dict[int, list[dict]] = {}
     for page, page_data in enumerate(recognition["pages"]):
-        for element in sorted(page_data.get("elements", []), key=lambda e: e.get("reading_order", 0)):
-            tags = element.get("tags") or []
-            label = normalize_label(element.get("label", ""), tags)
-            if label is not None:
-                elements.append(
-                    {"label": label, "bbox": element["bbox"], "text": element.get("text") or "", "page": page}
-                )
-    return elements
+        for order, element in enumerate(sorted(page_data.get("elements", []), key=lambda e: e.get("reading_order", 0))):
+            item = {
+                "id": (page, order),
+                "label": normalize_label(element.get("label", ""), element.get("tags")),
+                "bbox": element["bbox"],
+                "text": element.get("text") or "",
+                "page": page,
+            }
+            every.setdefault(page, []).append(item)
+            if item["label"] is not None:
+                elements.append(item)
+    return elements, every
 
 
 def _split_blocks(elements: list[dict]) -> list[list[dict]]:
@@ -140,11 +186,29 @@ def _split_blocks(elements: list[dict]) -> list[list[dict]]:
     return blocks
 
 
+def _mark_references(block: list[dict], text_of: TextOf) -> None:
+    """Label the entries of a reference list ``reference`` (Dolphin often calls them para/catalogue)."""
+    heading = block[0] if block[0]["label"] in HEADING_LEVELS else None
+    in_references = heading is not None and bool(REFERENCE_HEADING_RE.match(text_of(heading).lstrip(" #*_")))
+    if not in_references:
+        return
+    for element in block[1:]:
+        if element["label"] in ("para", "list"):
+            text = text_of(element)
+            if not text.strip() or looks_like_references(text):
+                element["label"] = "reference"
+
+
 def _order_block(block: list[dict]) -> list[dict]:
     def pick(labels):
         return [e for e in block if e["label"] in labels]
 
-    return pick(("title",)) + pick(TEXT_FLOW_LABELS) + pick(FIGURE_LABELS) + pick(FOOTNOTE_LABELS)
+    return (
+        pick(("title", *HEADING_LEVELS))
+        + pick((*TEXT_FLOW_LABELS, "reference"))
+        + pick(FIGURE_LABELS)
+        + pick(FOOTNOTE_LABELS)
+    )
 
 
 def _merge_bbox(bboxes: list[list[int]], scale: float) -> list[int]:
@@ -156,29 +220,30 @@ def _merge_bbox(bboxes: list[list[int]], scale: float) -> list[int]:
     ]
 
 
+def _flow(label: str) -> str | None:
+    """Elements of the same flow can share a region: running text, or a reference list."""
+    if label in TEXT_FLOW_LABELS:
+        return "text"
+    return "reference" if label == "reference" else None
+
+
 def _regions(block: list[dict], scale: float) -> list[dict]:
-    """Merge consecutive text elements that are vertically close (same column and page)."""
+    """Merge consecutive elements of one flow that are vertically close (same column and page)."""
     regions: list[dict] = []
     for element in block:
         previous = regions[-1] if regions else None
+        flow = _flow(element["label"])
         if (
-            element["label"] in TEXT_FLOW_LABELS
+            flow is not None
             and previous is not None
-            and previous["mergeable"]
+            and previous["flow"] == flow
             and element["page"] == previous["page"]
             and abs(element["bbox"][1] - previous["bottom"]) < 100 * scale
         ):
             previous["elements"].append(element)
             previous["bottom"] = element["bbox"][3]
         else:
-            regions.append(
-                {
-                    "elements": [element],
-                    "page": element["page"],
-                    "bottom": element["bbox"][3],
-                    "mergeable": element["label"] in TEXT_FLOW_LABELS,
-                }
-            )
+            regions.append({"elements": [element], "page": element["page"], "bottom": element["bbox"][3], "flow": flow})
     for region in regions:
         elements = region["elements"]
         region["first_label"] = elements[0]["label"]
@@ -187,23 +252,34 @@ def _regions(block: list[dict], scale: float) -> list[dict]:
     return regions
 
 
-def _is_reference(labels: list[str], text: str) -> bool:
-    return "reference" in labels or bool(REFERENCE_HEADING_RE.match(text.lstrip(" #*_\n\t")))
+def _continues(previous: dict, region: dict) -> bool:
+    """A paragraph or a reference list going on in the next column or page."""
+    if previous["flow"] == region["flow"] == "reference":
+        return True
+    return previous["last_label"] in CONTINUATION_LABELS and region["first_label"] in CONTINUATION_LABELS
 
 
-def build_segments(recognition: dict, page_height: int = REFERENCE_PAGE_HEIGHT) -> list[Segment]:
-    """Group Dolphin's elements into segments in reading order."""
+def build_segments(
+    recognition: dict, page_height: int = REFERENCE_PAGE_HEIGHT, text_of: TextOf | None = None
+) -> list[Segment]:
+    """Group Dolphin's elements into segments in reading order.
+
+    ``text_of(element)`` returns the text of an element (from the PDF's text
+    layer when there is one); it is used to find the reference list.  By
+    default Dolphin's own text is used.
+    """
+    text_of = text_of or (lambda element: element["text"])
     scale = page_height / REFERENCE_PAGE_HEIGHT
-    regions = [r for block in _split_blocks(_flatten(recognition)) for r in _regions(_order_block(block), scale)]
+    elements, every = _flatten(recognition)
+    regions = []
+    for block in _split_blocks(elements):
+        _mark_references(block, text_of)
+        regions += _regions(_order_block(block), scale)
 
     # join regions that continue across columns/pages
     groups: list[list[dict]] = []
     for region in regions:
-        if (
-            groups
-            and groups[-1][-1]["last_label"] in CONTINUATION_LABELS
-            and region["first_label"] in CONTINUATION_LABELS
-        ):
+        if groups and _continues(groups[-1][-1], region):
             groups[-1].append(region)
         else:
             groups.append([region])
@@ -213,30 +289,91 @@ def build_segments(recognition: dict, page_height: int = REFERENCE_PAGE_HEIGHT) 
         if current[0]["last_label"] in ("fig", "tab") and following[0]["first_label"] == "cap":
             current[0]["bbox"] = _merge_bbox([current[0]["bbox"], following[0]["bbox"]], scale)
 
-    segments = []
+    segments: list[Segment] = []
     for group in groups:
-        elements = [e for region in group for e in region["elements"]]
-        labels = [e["label"] for e in elements]
-        texts = [e["text"] for e in elements]
+        members = [e for region in group for e in region["elements"]]
+        labels = [e["label"] for e in members]
         if labels[0] == "title":
             kind = "title"
+        elif labels[0] in HEADING_LEVELS:
+            kind = "heading"
         elif labels[-1] in ("fig", "tab"):
             kind = "figure"
-        elif _is_reference(labels, "\n".join(t for t in texts if t)):
+        elif all(label == "reference" for label in labels):
             kind = "reference"
         else:
             kind = "text"
-        segments.append(
-            Segment(
-                kind=kind,
-                first_label=labels[0],
-                labels=labels,
-                bboxes=[region["bbox"] for region in group],
-                pages=[region["page"] for region in group],
-                texts=texts,
-            )
+        segment = Segment(
+            kind=kind,
+            first_label=labels[0],
+            labels=labels,
+            bboxes=[region["bbox"] for region in group],
+            pages=[region["page"] for region in group],
+            texts=[e["text"] for e in members],
+            elements=[{"label": e["label"], "bbox": e["bbox"], "page": e["page"]} for e in members],
         )
+        if kind == "reference":
+            ids = {e["id"] for e in members}
+            segment.exclude = {
+                page: [e["bbox"] for e in every[page] if e["id"] not in ids] for page in sorted(set(segment.pages))
+            }
+        if kind == "title" and segments and segments[-1].kind == "title":  # a title on two elements
+            previous = segments[-1]
+            previous.labels += segment.labels
+            previous.bboxes += segment.bboxes
+            previous.pages += segment.pages
+            previous.texts += segment.texts
+            previous.elements += segment.elements
+            continue
+        segments.append(segment)
     return segments
+
+
+MAX_HEADING_CHARS = 200  # a longer "heading" is a paragraph Dolphin mislabelled: translate it
+
+
+def clean_ocr_text(text: str) -> str:
+    """
+    Dolphin's text of a title or heading without Markdown/LaTeX markup, on one line.
+
+    >>> clean_ocr_text("## 3.1 Encoder and\\nDecoder Stacks")
+    '3.1 Encoder and Decoder Stacks'
+    >>> clean_ocr_text("\\\\title{Improved Baselines with Visual Instruction Tuning}")
+    'Improved Baselines with Visual Instruction Tuning'
+    """
+    text = re.sub(
+        r"\\(?:title|section|subsection|subsubsection|paragraph|textbf|textit|emph)\*?\s*\{(.*?)\}",
+        r"\1",
+        text,
+        flags=re.S,
+    )
+    return join_lines(re.sub(r"^#+\s*", "", line).strip().strip("*_").strip() for line in text.splitlines())
+
+
+def attach_printed_text(segments: list[Segment], layer: TextLayer | None) -> None:
+    """Fill the title and headings (``source_text``) and the reference entries (``entries``).
+
+    The text comes from the PDF's text layer, or from Dolphin's OCR on pages
+    without one.  What stays empty is transcribed from the images by the model.
+    """
+    for segment in segments:
+        if segment.kind in ("title", "heading"):
+            parts = []
+            for element, ocr in zip(segment.elements, segment.texts, strict=True):
+                text = layer.text(element["page"], element["bbox"]) if layer is not None else ""
+                parts.append(text or clean_ocr_text(ocr))
+            text = " ".join(part for part in parts if part).strip()
+            if segment.kind == "title":
+                segment.source_text = clean_title(text)
+            elif len(text) > MAX_HEADING_CHARS:
+                segment.kind = "text"
+            else:
+                segment.source_text = text
+        elif segment.kind == "reference":
+            entries = reference_entries(layer, segment.elements, segment.exclude) if layer is not None else None
+            if entries is None and segment.texts and all(text.strip() for text in segment.texts):
+                entries = split_ocr_reference_entries(segment.texts)
+            segment.entries = entries or []
 
 
 def crop_segments(segments: list[Segment], pages: list[Image.Image], out_dir: str | Path) -> None:

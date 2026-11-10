@@ -2,7 +2,15 @@
 
 import unittest
 
-from paper2md.markdown import finalize_markdown, first_heading, normalize_headings, normalize_math, summary_for_slack
+from paper2md.markdown import (
+    finalize_markdown,
+    first_heading,
+    normalize_headings,
+    normalize_math,
+    reference_list,
+    summary_for_slack,
+    text_for_summary,
+)
 
 
 class FinalizeMarkdownTests(unittest.TestCase):
@@ -12,7 +20,7 @@ class FinalizeMarkdownTests(unittest.TestCase):
         out = finalize_markdown(f"本文 {inline} を使う。\n\n{block}\n\n\\[ y = x \\]")
         self.assertIn(block, out)
         self.assertIn(inline, out)
-        self.assertIn("\n$$\ny = x\n$$", out)  # \\[ \\] becomes a $$ block
+        self.assertIn("\n$$\ny = x\n$$", out)  # \[ \] becomes a $$ block
 
     def test_code_is_left_untouched(self):
         code = "```python\ndef foo(x):\n    return x * 2  # $not math$\n```"
@@ -33,12 +41,12 @@ class HeadingTests(unittest.TestCase):
     def check(self, source, expected):
         self.assertEqual(normalize_headings(source), expected)
 
-    def test_numbered_levels(self):
-        self.check("# Title\n### 2 Method", "# Title\n## 2. Method")
-        self.check("# Title\n## 2.1 Training", "# Title\n### 2.1. Training")
+    def test_numbered_levels(self):  # the level follows the numbering; the text stays as printed
+        self.check("# Title\n### 2 Method", "# Title\n## 2 Method")
+        self.check("# Title\n## 2.1 Training", "# Title\n### 2.1 Training")
         self.check("# Title\n## 3.2.1. Scaled Attention", "# Title\n#### 3.2.1. Scaled Attention")
-        self.check("# Title\n# 4 Experiments", "# Title\n## 4. Experiments")
-        self.check("# Title\n# A.1 Details", "# Title\n### A.1. Details")
+        self.check("# Title\n# 4 Experiments", "# Title\n## 4 Experiments")
+        self.check("# Title\n# A.1 Details", "# Title\n### A.1 Details")
 
     def test_not_section_numbers(self):
         for heading in ("## A Survey Section", "## 2023 Results", "## Related Work", "## C#"):
@@ -50,7 +58,7 @@ class HeadingTests(unittest.TestCase):
         self.check("# T\nAppendix A shows the proof.", "# T\nAppendix A shows the proof.")
 
     def test_run_in_heading_is_split(self):
-        self.check("# T\n**3.1 Training** 本文が続く。", "# T\n### 3.1. Training\n\n本文が続く。")
+        self.check("# T\n**3.1 Training** 本文が続く。", "# T\n### 3.1 Training\n\n本文が続く。")
         self.check("# T\n**Training.** We train.", "# T\n**Training.** We train.")
 
 
@@ -79,6 +87,21 @@ class MathTests(unittest.TestCase):
         self.check("費用は $5 と $10 です。", "費用は $5 と $10 です。")
         code = "`$x$` と\n\n```python\nprint('\\(x\\)')\n```"
         self.check(code, code)
+
+
+class ReferenceAndSummaryInputTests(unittest.TestCase):
+    def test_reference_list(self):
+        self.assertEqual(
+            reference_list(["[1] A. B. Title.  2020.", "3. C. D. Other.", "- weird"]),
+            "- [1] A. B. Title. 2020.\n- 3\\. C. D. Other.\n- \\- weird",
+        )
+        # it survives the final formatting unchanged
+        out = finalize_markdown("## References\n\n" + reference_list(["[1] A. Name_with_underscore. 2020."]))
+        self.assertIn("- [1] A. Name_with_underscore. 2020.", out)
+
+    def test_text_for_summary(self):
+        markdown = '# T\n\n## 1 Intro\n\n本文\n\n<img src="figures/fig01.png">\n\n## References\n\n- [1] X\n\n## A Appendix\n\n付録'
+        self.assertEqual(text_for_summary(markdown), "# T\n\n## 1 Intro\n\n本文\n\n## A Appendix\n\n付録\n")
 
 
 class SummaryTests(unittest.TestCase):
