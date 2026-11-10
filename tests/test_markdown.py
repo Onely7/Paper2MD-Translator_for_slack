@@ -2,7 +2,7 @@
 
 import unittest
 
-from paper2md.markdown import finalize_markdown, first_heading, normalize_headings, summary_for_slack
+from paper2md.markdown import finalize_markdown, first_heading, normalize_headings, normalize_math, summary_for_slack
 
 
 class FinalizeMarkdownTests(unittest.TestCase):
@@ -12,7 +12,7 @@ class FinalizeMarkdownTests(unittest.TestCase):
         out = finalize_markdown(f"本文 {inline} を使う。\n\n{block}\n\n\\[ y = x \\]")
         self.assertIn(block, out)
         self.assertIn(inline, out)
-        self.assertIn("\\[ y = x \\]", out)
+        self.assertIn("\n$$\ny = x\n$$", out)  # \\[ \\] becomes a $$ block
 
     def test_code_is_left_untouched(self):
         code = "```python\ndef foo(x):\n    return x * 2  # $not math$\n```"
@@ -52,6 +52,33 @@ class HeadingTests(unittest.TestCase):
     def test_run_in_heading_is_split(self):
         self.check("# T\n**3.1 Training** 本文が続く。", "# T\n### 3.1. Training\n\n本文が続く。")
         self.check("# T\n**Training.** We train.", "# T\n**Training.** We train.")
+
+
+class MathTests(unittest.TestCase):
+    def check(self, source, expected):
+        self.assertEqual(normalize_math(source).strip(), expected)
+
+    def test_delimiters(self):
+        self.check("式 \\(a_i\\) を使う。", "式 $a_i$ を使う。")
+        self.check("次式。\n\\[\nE = mc^2\n\\]\n続き。", "次式。\n\n$$\nE = mc^2\n$$\n\n続き。")
+        self.check(
+            "\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}",
+            "$$\n\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}\n$$",
+        )
+        self.check("和は $$\\sum_i x_i$$ である。", "和は $\\sum_i x_i$ である。")  # $$ inside a sentence: inline
+        self.check("$$x = 1$$", "$$\nx = 1\n$$")
+
+    def test_repairs_inside_math(self):
+        self.check("損失$L\\_{\\text{ce}}$を最小化する。", "損失 $L_{\\text{ce}}$ を最小化する。")
+        self.check("$\\text{max\\_len}$", "$\\text{max\\_len}$")  # the escape is right inside \\text
+        self.check("$$\n\\\\frac{a}{b}\n$$", "$$\n\\frac{a}{b}\n$$")
+        self.check("$$\ny = Wx \\quad (2)\n$$", "$$\ny = Wx \\tag{2}\n$$")
+        self.check("$ x + y $ と書く。", "$x + y$ と書く。")
+
+    def test_not_math(self):
+        self.check("費用は $5 と $10 です。", "費用は $5 と $10 です。")
+        code = "`$x$` と\n\n```python\nprint('\\(x\\)')\n```"
+        self.check(code, code)
 
 
 class SummaryTests(unittest.TestCase):
