@@ -13,7 +13,9 @@
 ## できること
 
 - 論文を送ると、日本語の要約、翻訳した Markdown、Markdown と図表をまとめた ZIP、図表の画像をスレッドに返します。
-- ページ内の図表・見出し・本文・数式・参考文献の位置は [Dolphin-v2](https://github.com/bytedance/Dolphin) で解析し、本文は OpenAI のモデルでページの画像から翻訳します。既定のモデルは、翻訳が `gpt-6.1-terra`、要約が `gpt-6.1-sol` です。
+- ページ内の図表・見出し・本文・数式・参考文献の位置は [Dolphin-v2](https://github.com/bytedance/Dolphin) で解析し、本文は OpenAI のモデルでページの画像から翻訳します。数式は LaTeX で書きます。
+- タイトル、見出し、パラグラフ名、参考文献は英語のまま残します。タイトル、見出し、参考文献は PDF に書かれている文字をそのまま写します。
+- 翻訳と要約に使うモデルと Reasoning Effort は、利用者がそれぞれ Home タブで選べます。既定のモデルは、翻訳が `gpt-6.1-terra`、要約が `gpt-6.1-sol` です。
 - 一度翻訳した論文は保存しておき、次からはすぐに返します。
 - `--no-cache` を付けると、サーバーにデータを残さずに処理します。
 
@@ -41,6 +43,12 @@ https://arxiv.org/abs/2304.08485
 
 使う前に、Paper2MD-Translator の Home タブで OpenAI の API Key を登録してください。Gyazo のアクセストークンも登録すると、投稿される Markdown の図表が Gyazo の画像 URL になります。登録しない場合も、ZIP の中の Markdown では図表が表示されます。
 
+### モデルを選ぶ
+
+Home タブの「モデル」で、翻訳と要約に使うモデルと Reasoning Effort を選べます。モデルの選択肢は、既定では `gpt-6-luna`、`gpt-6.1-terra`、`gpt-6.1-sol`、`gpt-6-astra` の 4 つで（`OPENAI_MODEL_CHOICES` で変えられます）、料金と一緒に表示します。Reasoning Effort の選択肢には、選んだモデルが受け付ける値だけが出ます（`gpt-6.1-sol` と `gpt-6-astra` では `none` を選べません）。選んでいた Reasoning Effort を受け付けないモデルに変えたときは、受け付ける値のうちいちばん近い値にして、そのことを Home タブに表示します。何も選んでいない場合は、サーバーの既定値を使います。
+
+Reasoning Effort を上げると数式や長い文の翻訳がよくなることがありますが、時間と料金が増えます。翻訳を始めるときに、使うモデルをスレッドに投稿します。
+
 ### 翻訳済みの論文
 
 一度翻訳した論文は要約と翻訳を保存しておき、次からはすぐに返します。保存した結果は利用者全員で共有します。
@@ -48,7 +56,7 @@ https://arxiv.org/abs/2304.08485
 - arXiv の論文はバージョンごとに保存します。同じバージョンなら `/abs/`、`/pdf/`、`/html/` のどのリンクでも同じ論文として扱います。
 - バージョンを指定しないリンク（`https://arxiv.org/abs/2408.03326` など）は、送った時点の最新版を翻訳します。以前に v2 を翻訳していても、その後 v3 が公開されていれば v3 を翻訳します。v2 の結果は `https://arxiv.org/abs/2408.03326v2` で引き続き返します。
 - ほかの PDF はファイルの中身（SHA-256）で同じ論文かを判定します。名前が違っても中身が同じなら保存済みの結果を返し、同じ名前や同じ URL でも中身が違えば翻訳し直します。
-- 翻訳し直すときは `--refresh` を付けてください（`--force`、`再翻訳` でも同じです）。新しい結果で保存済みの結果を置き換えます。
+- 保存済みの結果は、利用者が選んでいるモデルにかかわらず返し、その結果を作ったモデルをスレッドで知らせます。今のモデルで翻訳し直すときは `--refresh` を付けてください（`--force`、`再翻訳` でも同じです）。新しい結果で保存済みの結果を置き換えます。
 - 一部の翻訳に失敗した結果は保存しません。
 
 ### サーバーにデータを残さない
@@ -114,9 +122,10 @@ export SLACK_APP_TOKEN="xapp-..."
 
 | 変数 | 内容 |
 | --- | --- |
-| `TRANSLATION_MODEL` | 翻訳に使う OpenAI のモデル（`gpt-6.1-terra`） |
-| `SUMMARY_MODEL` | 要約に使う OpenAI のモデル（`gpt-6.1-sol`） |
-| `TRANSLATION_REASONING_EFFORT` / `SUMMARY_REASONING_EFFORT` | reasoning effort（`none` / `medium`）。モデルが受け付けない値は、受け付ける値に自動で置き換えます（例: `gpt-6.1-sol` では `none` を `low` にします） |
+| `TRANSLATION_MODEL` | 翻訳に使う OpenAI のモデルの既定値。Home タブでモデルを選んでいない利用者に使います（`gpt-6.1-terra`） |
+| `SUMMARY_MODEL` | 要約に使う OpenAI のモデルの既定値（`gpt-6.1-sol`） |
+| `TRANSLATION_REASONING_EFFORT` / `SUMMARY_REASONING_EFFORT` | Reasoning Effort の既定値（`none` / `medium`）。モデルが受け付けない値は、受け付ける値のうちいちばん近い値に置き換えます（例: `gpt-6.1-sol` では `none` を `low` にします） |
+| `OPENAI_MODEL_CHOICES` | Home タブの選択肢に出すモデル（カンマ区切り。`gpt-6-luna,gpt-6.1-terra,gpt-6.1-sol,gpt-6-astra`） |
 | `TRANSLATION_IMAGE_DETAIL` | モデルに送るページ画像の detail（`auto`） |
 | `OPENAI_MAX_CONCURRENCY` | 1 本の論文で同時に送る OpenAI へのリクエストの数（`8`） |
 | `PAGE_RESOLUTION` | PDF のページを画像にするときの長辺のピクセル数（`4000`） |
@@ -124,12 +133,12 @@ export SLACK_APP_TOKEN="xapp-..."
 | `MAX_CONCURRENT_JOBS` | 同時に翻訳する論文の数（`2`） |
 | `PAPER_CACHE_DIR` | 翻訳済みの論文の保存先（`data/cache`） |
 | `NO_CACHE_WORKDIR` | `--no-cache` の一時ディレクトリを作る場所（`/dev/shm`） |
-| `KEY_DB_PATH` | 利用者の API Key を保存する SQLite のファイル（`user_keys.db`） |
+| `KEY_DB_PATH` | 利用者の API Key と選んだモデルを保存する SQLite のファイル（`user_keys.db`） |
 | `DOLPHIN_MODEL_PATH` | Dolphin-v2 のモデルの場所（`models/Dolphin-v2`） |
 | `DOLPHIN_DEVICE` / `DOLPHIN_DTYPE` | Dolphin-v2 を動かすデバイスと精度（`cuda`。精度は GPU に合わせて bf16 か fp16） |
 | `DOLPHIN_MAX_BATCH_SIZE` | Dolphin-v2 が並べて読み取る要素の数（`4`） |
 | `DOLPHIN_KEEP_LOADED` | `1` にすると、Dolphin-v2 をリクエストの合間も GPU に置いたままにします（`0`） |
-| `DOLPHIN_RECOGNIZE_LABELS` | `all` にすると、上流と同じくすべての要素の文字を Dolphin-v2 で読み取ります（既定では、翻訳で使うタイトル・見出し・参考文献だけを読み取ります） |
+| `DOLPHIN_RECOGNIZE_LABELS` | `all` にすると、上流と同じくすべての要素の文字を Dolphin-v2 で読み取ります（既定では、文字が埋め込まれていないページ（スキャンした PDF）でだけ、タイトル・見出し・参考文献を読み取ります） |
 | `LOG_LEVEL` | ログの出力レベル（`INFO`） |
 
 `PAPER_CACHE_DIR` には論文ごとのディレクトリ（`arxiv-<id>v<version>/` か `sha256-<hash>/`）を作り、PDF、要約、Markdown、図表、途中のファイル、`manifest.json` を保存します。ディレクトリは権限 `0700` で作ります。
@@ -161,7 +170,7 @@ Slack を通さずに翻訳することもできます。`OPENAI_API_KEY` を設
 OPENAI_API_KEY=sk-... uv run python -m paper2md translate https://arxiv.org/abs/2304.08485 --out results/llava
 ```
 
-`--gyazo`（`GYAZO_ACCESS_TOKEN` を使います）、`--translation-model`、`--summary-model` も指定できます。
+`--gyazo`（`GYAZO_ACCESS_TOKEN` を使います）、`--translation-model`、`--translation-effort`、`--summary-model`、`--summary-effort` も指定できます。
 
 ### キャッシュの管理
 
@@ -176,8 +185,9 @@ uv run python -m paper2md cache prune --older-than 180    # 180 日より前に�
 
 1. Slack のメッセージから論文を特定し、保存済みかどうかを調べます。arXiv は最新版のバージョンを、ほかの PDF は SHA-256 をキーにします。
 2. 保存済みでなければ、PDF のページを画像にし、Dolphin-v2 で図表・見出し・本文などの位置と読む順番を解析します。
-3. 本文はページから切り出した画像のまま OpenAI のモデルに渡して翻訳します。タイトルと参考文献は、Dolphin-v2 が読み取った文字から整えます。
-4. 翻訳を Markdown にまとめて要約を作り、Slack に投稿して保存します。
+3. タイトル、見出し、参考文献は、PDF に埋め込まれた文字をそのまま写します。文字が埋め込まれていないスキャンした PDF では Dolphin-v2 が読み取った文字を使い、それもなければモデルに翻訳させずに書き写させます。
+4. 本文はページから切り出した画像のまま OpenAI のモデルに渡して翻訳します。リクエストには論文のタイトルと節の見出しも添えます。プロンプトは `paper2md/prompt_texts/` にあります。
+5. 数式を `$...$` と `$$` のブロックにそろえて Markdown にまとめ、要約を作り、Slack に投稿して保存します。
 
 ## ディレクトリ構成
 
@@ -185,7 +195,8 @@ uv run python -m paper2md cache prune --older-than 180    # 180 日より前に�
 | --- | --- |
 | `app.py` | ボットの起動（Socket Mode と HTTP モード） |
 | `bot/` | Slack のイベント、リクエストの処理、Home タブ、API Key の保存 |
-| `paper2md/` | 翻訳の処理（PDF、Dolphin-v2、レイアウト、プロンプト、翻訳、Markdown、キャッシュ、CLI） |
+| `paper2md/` | 翻訳の処理（PDF とその文字、Dolphin-v2、レイアウト、モデル、プロンプト、翻訳、Markdown、キャッシュ、CLI） |
+| `paper2md/prompt_texts/` | 翻訳と要約の日本語のプロンプト |
 | `Dolphin/` | [bytedance/Dolphin](https://github.com/bytedance/Dolphin) のコミット `befa5da` のコード。import の行だけを変えています |
 | `scripts/` | 起動と ngrok のスクリプト |
 | `tests/` | 単体テスト |
@@ -205,10 +216,10 @@ uv run ruff format --check .
 ```bibtex
 @software{
   author = {Daiki Shiono},
-  month = {Aug},
+  month = {Nov},
   title = {{Paper2MD-Translator}},
   url = {https://github.com/Onely7/Paper2MD-Translator_for_slack},
-  version = {0.1.0},
-  year = {2025}
+  version = {0.2.0},
+  year = {2026}
 }
 ```

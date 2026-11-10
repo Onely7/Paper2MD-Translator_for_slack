@@ -13,7 +13,9 @@ English | [日本語](./docs/README_ja.md)
 ## What it does
 
 - Send a paper in Slack and the bot replies in the thread with a Japanese summary, the translated Markdown, a ZIP with the Markdown and its figures, and the figure images.
-- [Dolphin-v2](https://github.com/bytedance/Dolphin) finds the figures, headings, paragraphs, formulas and references on each page; the text is translated from the page images by an OpenAI model (by default `gpt-6.1-terra` for the translation and `gpt-6.1-sol` for the summary).
+- [Dolphin-v2](https://github.com/bytedance/Dolphin) finds the figures, headings, paragraphs, formulas and references on each page. The paragraphs are translated from the page images by an OpenAI model, with formulas in LaTeX.
+- The title, headings, paragraph names and references stay in English. The title, headings and references are copied from the PDF exactly as printed.
+- Each user picks the OpenAI models and the reasoning effort for the translation and the summary in the Home tab (by default `gpt-6.1-terra` for the translation and `gpt-6.1-sol` for the summary).
 - Papers translated once are stored and returned immediately next time.
 - With `--no-cache`, nothing is kept on the server.
 
@@ -41,6 +43,12 @@ If a long URL is not recognized, wrap it in backticks (`` ` ``).
 
 Before the first request, register your OpenAI API key in the bot's Home tab. If you also register a Gyazo access token, the posted Markdown links its figures to Gyazo image URLs; without it, the Markdown inside the ZIP still shows the figures.
 
+### Choosing the models
+
+In the Home tab, under "モデル" (models), pick the model and the reasoning effort for the translation and for the summary. By default the models are `gpt-6-luna`, `gpt-6.1-terra`, `gpt-6.1-sol` and `gpt-6-astra` (`OPENAI_MODEL_CHOICES`), shown with their prices, and the effort menu offers only the values the chosen model accepts (`gpt-6.1-sol` and `gpt-6-astra` have no `none`). When you switch to a model that does not accept your effort, the closest accepted effort is used and the Home tab says so. Without a choice, the server defaults are used.
+
+A higher effort can improve formulas and long sentences, but takes longer and costs more. The bot posts the models it uses when it starts translating.
+
 ### Papers that were already translated
 
 The summary and translation of every paper are stored and shared by all users, so a paper translated once is returned immediately.
@@ -48,7 +56,7 @@ The summary and translation of every paper are stored and shared by all users, s
 - arXiv papers are stored per version. `/abs/`, `/pdf/` and `/html/` links to the same version are the same paper.
 - A link without a version (such as `https://arxiv.org/abs/2408.03326`) means the latest version when the request arrives. If v2 was translated before and v3 has been published since, v3 is translated; the v2 result is still returned for `https://arxiv.org/abs/2408.03326v2`.
 - Other PDFs are identified by the SHA-256 of the file: the same file hits under any name, while a different file with the same name, or a changed file behind the same URL, is translated again.
-- Add `--refresh` (also `--force` or `再翻訳`) to translate a paper again; the new result replaces the stored one.
+- A stored result is returned whichever models you chose; the bot tells which models made it. Add `--refresh` (also `--force` or `再翻訳`) to translate the paper again with your models; the new result replaces the stored one.
 - Results with failed segments are not stored.
 
 ### Keeping nothing on the server
@@ -114,9 +122,10 @@ Optional settings (defaults in parentheses):
 
 | Variable | Meaning |
 | --- | --- |
-| `TRANSLATION_MODEL` | OpenAI model for the translation (`gpt-6.1-terra`) |
-| `SUMMARY_MODEL` | OpenAI model for the summary (`gpt-6.1-sol`) |
-| `TRANSLATION_REASONING_EFFORT` / `SUMMARY_REASONING_EFFORT` | Reasoning effort (`none` / `medium`). Values a model does not accept are replaced automatically (e.g. `none` becomes `low` on `gpt-6.1-sol`) |
+| `TRANSLATION_MODEL` | Default OpenAI model for the translation, used for users who have not chosen one (`gpt-6.1-terra`) |
+| `SUMMARY_MODEL` | Default OpenAI model for the summary (`gpt-6.1-sol`) |
+| `TRANSLATION_REASONING_EFFORT` / `SUMMARY_REASONING_EFFORT` | Default reasoning effort (`none` / `medium`). A value the model does not accept is replaced by the closest accepted one (e.g. `none` becomes `low` on `gpt-6.1-sol`) |
+| `OPENAI_MODEL_CHOICES` | Models offered in the Home tab, comma separated (`gpt-6-luna,gpt-6.1-terra,gpt-6.1-sol,gpt-6-astra`) |
 | `TRANSLATION_IMAGE_DETAIL` | Image detail of the page crops sent to the model (`auto`) |
 | `OPENAI_MAX_CONCURRENCY` | Parallel OpenAI requests per paper (`8`) |
 | `PAGE_RESOLUTION` | Longest side in pixels of the rendered PDF pages (`4000`) |
@@ -124,12 +133,12 @@ Optional settings (defaults in parentheses):
 | `MAX_CONCURRENT_JOBS` | Papers translated at the same time (`2`) |
 | `PAPER_CACHE_DIR` | Where translated papers are stored (`data/cache`) |
 | `NO_CACHE_WORKDIR` | Where `--no-cache` creates its temporary directories (`/dev/shm`) |
-| `KEY_DB_PATH` | SQLite file with the users' API keys (`user_keys.db`) |
+| `KEY_DB_PATH` | SQLite file with the users' API keys and model choices (`user_keys.db`) |
 | `DOLPHIN_MODEL_PATH` | Location of the Dolphin-v2 model (`models/Dolphin-v2`) |
 | `DOLPHIN_DEVICE` / `DOLPHIN_DTYPE` | Device and precision for Dolphin-v2 (`cuda`; bf16 or fp16 depending on the GPU) |
 | `DOLPHIN_MAX_BATCH_SIZE` | Elements read by Dolphin-v2 in parallel (`4`) |
 | `DOLPHIN_KEEP_LOADED` | `1` keeps Dolphin-v2 on the GPU between requests (`0`) |
-| `DOLPHIN_RECOGNIZE_LABELS` | `all` makes Dolphin-v2 read the text of every element like upstream (by default only the title, headings and references, which the translation uses) |
+| `DOLPHIN_RECOGNIZE_LABELS` | `all` makes Dolphin-v2 read the text of every element like upstream. By default it reads only the title, headings and references, and only on pages without a text layer (scanned PDFs) |
 | `LOG_LEVEL` | Log level (`INFO`) |
 
 `PAPER_CACHE_DIR` gets one directory per paper (`arxiv-<id>v<version>/` or `sha256-<hash>/`) with the PDF, the summary, the Markdown, the figures, the intermediate files and a `manifest.json`. The directory is created with mode `0700`.
@@ -161,7 +170,7 @@ The pipeline also runs without Slack. Set `OPENAI_API_KEY` and run:
 OPENAI_API_KEY=sk-... uv run python -m paper2md translate https://arxiv.org/abs/2304.08485 --out results/llava
 ```
 
-`--gyazo` (uses `GYAZO_ACCESS_TOKEN`), `--translation-model` and `--summary-model` are also available.
+`--gyazo` (uses `GYAZO_ACCESS_TOKEN`), `--translation-model`, `--translation-effort`, `--summary-model` and `--summary-effort` are also available.
 
 ### Managing the cache
 
@@ -176,8 +185,9 @@ uv run python -m paper2md cache prune --older-than 180    # delete results store
 
 1. The bot finds the paper in the message and looks it up in the cache (arXiv papers by their latest version, other PDFs by SHA-256).
 2. If it is not stored, the PDF pages are rendered to images and Dolphin-v2 finds the position and reading order of figures, headings, paragraphs and other elements.
-3. The text is translated by an OpenAI model from the regions cropped out of the pages. The title and references are cleaned up from the text Dolphin-v2 read.
-4. The translations are assembled into Markdown, summarized, posted to Slack and stored.
+3. The title, headings and reference list are copied from the text embedded in the PDF. For a scanned PDF without text, the text read by Dolphin-v2 is used, and failing that the model transcribes them without translating.
+4. The paragraphs are translated by an OpenAI model from the regions cropped out of the pages; each request also carries the paper title and the section heading. The prompts are in `paper2md/prompt_texts/`.
+5. The parts are assembled into Markdown, with formulas normalized to `$...$` and `$$` blocks, summarized, posted to Slack and stored.
 
 ## Repository layout
 
@@ -185,7 +195,8 @@ uv run python -m paper2md cache prune --older-than 180    # delete results store
 | --- | --- |
 | `app.py` | Starts the bot (Socket Mode or HTTP mode) |
 | `bot/` | Slack events, request handling, the Home tab, API key storage |
-| `paper2md/` | The translation pipeline (PDF, Dolphin-v2, layout, prompts, translation, Markdown, cache, CLI) |
+| `paper2md/` | The translation pipeline (PDF and its text, Dolphin-v2, layout, models, prompts, translation, Markdown, cache, CLI) |
+| `paper2md/prompt_texts/` | The Japanese prompts for the translation and the summary |
 | `Dolphin/` | Code of [bytedance/Dolphin](https://github.com/bytedance/Dolphin) at commit `befa5da`; only import lines are changed |
 | `scripts/` | Start-up and ngrok scripts |
 | `tests/` | Unit tests |
@@ -205,10 +216,10 @@ uv run ruff format --check .
 ```bibtex
 @software{
   author = {Daiki Shiono},
-  month = {Aug},
+  month = {Nov},
   title = {{Paper2MD-Translator}},
   url = {https://github.com/Onely7/Paper2MD-Translator_for_slack},
-  version = {0.1.0},
-  year = {2025}
+  version = {0.2.0},
+  year = {2026}
 }
 ```
