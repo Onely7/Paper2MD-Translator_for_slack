@@ -1,12 +1,16 @@
 """Markdown post-processing (regressions of the old transform_markdown/mdformat chain)."""
 
 import unittest
+from unittest import mock
 
+import paper2md.markdown as markdown_module
 from paper2md.markdown import (
     finalize_markdown,
     first_heading,
+    format_markdown,
     normalize_headings,
     normalize_math,
+    normalize_text,
     reference_list,
     summary_for_slack,
     text_for_summary,
@@ -83,10 +87,36 @@ class MathTests(unittest.TestCase):
         self.check("$$\ny = Wx \\quad (2)\n$$", "$$\ny = Wx \\tag{2}\n$$")
         self.check("$ x + y $ と書く。", "$x + y$ と書く。")
 
+    def test_names_keep_their_underscore(self):  # 1706.03762 eq. (3): step_num rendered as step subscript n
+        equation = "$$\nlrate = \\min(step\\_num^{-0.5}, step\\_num \\cdot warmup\\_steps^{-1.5}) \\tag{3}\n$$"
+        self.check(equation, equation)
+        self.check("最初の$warmup_steps$回", "最初の $warmup\\_steps$ 回")  # a bare name gets the escape
+        self.check("$h\\_{t-1}$ と $\\log\\_k(n)$ と $W\\_i^Q$", "$h_{t-1}$ と $\\log_k(n)$ と $W_i^Q$")
+
     def test_not_math(self):
         self.check("費用は $5 と $10 です。", "費用は $5 と $10 です。")
         code = "`$x$` と\n\n```python\nprint('\\(x\\)')\n```"
         self.check(code, code)
+
+
+class FormatTests(unittest.TestCase):
+    # a line break written with a trailing backslash, a list, inline math with * and \_, a math block with \\
+    SOURCE = "Ashish Vaswani*\\\nGoogle Brain\n\n* 式 $a*b$ と $step\\_num$\n\n$$\nx \\\\\ny\n$$\n"
+
+    def check(self, out):
+        # a line break of two spaces, not a trailing backslash (mdformat also escapes the *, prettier does not)
+        self.assertRegex(out, r"Ashish Vaswani\\?\*  \nGoogle Brain")
+        self.assertIn("- 式 $a*b$ と $step\\_num$", out)
+        self.assertIn("$$\nx \\\\\ny\n$$", out)
+
+    def test_prettier(self):
+        if markdown_module.prettier("x\n") is None:
+            self.skipTest("prettier is not installed (uv run npm ci --prefix tools/prettier)")
+        self.check(format_markdown(self.SOURCE))
+
+    def test_mdformat_without_prettier(self):
+        with mock.patch.object(markdown_module, "prettier", return_value=None):
+            self.check(format_markdown(self.SOURCE))
 
 
 class ReferenceAndSummaryInputTests(unittest.TestCase):
@@ -114,6 +144,52 @@ class SummaryTests(unittest.TestCase):
     def test_first_heading(self):
         self.assertEqual(first_heading("intro\n# Title\n## 1. A"), "Title")
         self.assertIsNone(first_heading("## 1. A"))
+
+
+class NormalizeTextTests(unittest.TestCase):
+    def check(self, cases):
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(normalize_text(text), expected)
+                self.assertEqual(normalize_text(expected), expected)  # nothing more to change
+
+    def test_section_references(self):
+        self.check(
+            {
+                "3.2節で述べた": "Section 3.2 で述べた",
+                "（第5.4節）": "（Section 5.4）",
+                "WSJ の第 23 節": "WSJ の Section 23",
+                "セクション3を参照": "Section 3 を参照",
+                "Sec. 3.2 と Sect. 4": "Section 3.2 と Section 4",
+                "Section 3.2節で": "Section 3.2 で",
+                "この節では節約と節点を扱う。": "この節では節約と節点を扱う。",
+            }
+        )
+
+    def test_spaces_between_japanese_and_english(self):
+        self.check(
+            {
+                "Transformerは": "Transformer は",
+                "intra-attentionとも呼ばれる": "intra-attention とも呼ばれる",
+                "「QKV注意機構」": "「QKV 注意機構」",
+                "は**Transformer**を": "は **Transformer** を",
+                "`f(x)`を使い`g`と": "`f(x)` を使い `g` と",
+                "値$y=4x$とa$b$c": "値 $y=4x$ と a $b$ c",
+                "コードはhttps://github.com/a/bで公開": "コードは https://github.com/a/b で公開",
+                "Table 3の行とFigure 2を参照": "Table 3 の行と Figure 2 を参照",
+                "8基のGPU、12時間": "8 基の GPU、12 時間",
+                "第5層の2つ": "第 5 層の 2 つ",
+                "約450万の文と3600万文": "約 450万の文と 3600万文",  # 万 belongs to the number
+                "（WSJ）部分": "（WSJ）部分",
+            }
+        )
+
+    def test_blocks_html_and_references_are_left_alone(self):
+        text = (
+            '```\nコードx\n```\n\n$$\na日本\n$$\n\n<img src="figures/fig01.png" alt="図a">\n\n'
+            "## References\n\n- [1] 山田Taro. 論文Title. 2020.\n\n## Appendix\n\n付録A"
+        )
+        self.assertEqual(normalize_text(text), text.replace("付録A", "付録 A"))
 
 
 if __name__ == "__main__":

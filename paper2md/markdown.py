@@ -1,30 +1,50 @@
 """
 Post-processing of the translated Markdown and the Slack summary.
 
-``finalize_markdown`` turns the concatenated segments into the final file:
+``finalize_markdown`` turns the concatenated segments into one document:
 
 1. ``normalize_math`` rewrites the math of the model outputs into the form
    Markdown renderers (GitHub, VS Code, Obsidian, Typora) display:
    ``$...$`` inline and ``$$`` blocks on their own lines.  ``\\( \\)`` and
    ``\\[ \\]`` delimiters, bare ``\\begin{align}`` environments, spaces inside
-   ``$ x $``, Markdown escapes inside math (``\\_``), doubled backslashes and
+   ``$ x $``, Markdown escapes inside math (``x\\_i``), doubled backslashes and
    ``\\quad (3)`` equation numbers are fixed; a space is put between inline
-   math and Japanese text.
-2. Math and code are swapped for placeholders, because mdformat escapes their
-   characters (``\\max`` -> ``\\\\max``, ``*`` -> ``\\*``) and would break the LaTeX.
-3. mdformat normalizes the Markdown, and only heading lines are adjusted:
-   numbered headings get the level of their numbering (``2`` -> ``##``,
-   ``2.1`` -> ``###``, ``2.1.3`` -> ``####``) and Abstract / References /
-   Appendix / Acknowledgments become ``##``; the heading text is kept as printed.
+   math and Japanese text.  The underscore of a name (``step\\_num``) stays
+   escaped, otherwise it would render as a subscript.
+2. Only heading lines are adjusted: numbered headings get the level of their
+   numbering (``2`` -> ``##``, ``2.1`` -> ``###``, ``2.1.3`` -> ``####``) and
+   Abstract / References / Appendix / Acknowledgments become ``##``; the
+   heading text is kept as printed.  The title (``#``) and all other lines
+   (paragraphs, lists, code) are left alone.
 
-The title (``#``) and all other lines (paragraphs, lists, code) are left alone.
+``normalize_text`` writes section references as ``Section 3.2`` and puts a
+space between Japanese and English words, numbers, inline code, inline math
+and URLs (not in code blocks, display math, HTML tags or the reference list).
+
+``format_markdown`` is the last step: prettier (``tools/prettier``, run with
+the Node.js of the ``nodejs-wheel`` package) formats the file, or mdformat when
+prettier is not installed.  Math and code are swapped for placeholders while
+formatting, so their characters are never escaped, and line breaks are written
+as two trailing spaces: a trailing ``\\`` is shown as a stray backslash by
+renderers that do not follow CommonMark.
 """
 
 from __future__ import annotations
 
+import logging
 import re
+import shutil
+import subprocess
+from pathlib import Path
 
 import mdformat
+
+from .config import REPO_ROOT
+
+logger = logging.getLogger(__name__)
+
+PRETTIER = REPO_ROOT / "tools" / "prettier" / "node_modules" / "prettier" / "bin" / "prettier.cjs"
+PRETTIER_TIMEOUT = 120  # seconds
 
 _FENCE_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^(?P=indent)(?P=fence)[ \t]*$", re.M | re.S
@@ -110,12 +130,27 @@ def _outside_text_groups(content: str, fix) -> str:
     return "".join(parts)
 
 
+# An underscore between two words of two or more letters belongs to a name (step_num, warmup_steps):
+# escaped (step\_num) it is kept, bare it gets escaped.  Elsewhere "\_" is a needlessly escaped subscript.
+_ESCAPED_NAME_UNDERSCORE_RE = re.compile(r"(?<![\\A-Za-z])([A-Za-z]{2,})\\_(?=[A-Za-z]{2,})")
+_BARE_NAME_UNDERSCORE_RE = re.compile(r"(?<![\\A-Za-z])([A-Za-z]{2,})_(?=[A-Za-z]{2,})")
+
+
+def _repair_escapes(part: str) -> str:
+    part = _ESCAPED_NAME_UNDERSCORE_RE.sub(lambda m: m.group(1) + "\0", part)
+    part = re.sub(r"\\([_*])", r"\1", part)
+    part = _BARE_NAME_UNDERSCORE_RE.sub(lambda m: m.group(1) + "\0", part)
+    return part.replace("\0", "\\_")
+
+
 def clean_math(content: str, display: bool = False) -> str:
     """
     Repair what models often get wrong inside math.
 
     >>> clean_math(r"\\max\\_{z} p(x\\_i \\* y)")
     '\\\\max_{z} p(x_i * y)'
+    >>> clean_math(r"\\min(step\\_num^{-0.5}, warmup_steps) + lr\\_t")    # names keep their underscore
+    '\\\\min(step\\\\_num^{-0.5}, warmup\\\\_steps) + lr_t'
     >>> clean_math(r"\\\\frac{a}{b} + \\\\alpha")    # every backslash doubled
     '\\\\frac{a}{b} + \\\\alpha'
     >>> clean_math(r"y = x \\qquad (3)", display=True)
@@ -125,7 +160,7 @@ def clean_math(content: str, display: bool = False) -> str:
     # doubled backslashes everywhere ("\\frac", "\\alpha") but no single command: halve them
     if re.search(r"\\\\[A-Za-z]", content) and not re.search(r"\\[A-Za-z]", content.replace("\\\\", "")):
         content = content.replace("\\\\", "\\")
-    content = _outside_text_groups(content, lambda part: re.sub(r"\\([_*])", r"\1", part))
+    content = _outside_text_groups(content, _repair_escapes)
     if display and "\\tag" not in content:
         content = _EQUATION_NUMBER_RE.sub(lambda m: f" \\tag{{{m.group(1)}}}", content)
     return content
@@ -237,17 +272,130 @@ def normalize_headings(markdown: str) -> str:
 # ---------------------------------------------------------------------------
 # Whole document
 # ---------------------------------------------------------------------------
+_PROTECTED_PATTERNS = [(_FENCE_RE, True), (_DISPLAY_MATH_RE, True), (_INLINE_CODE_RE, False), (_INLINE_MATH_RE, False)]
+_BACKSLASH_BREAK_RE = re.compile(r"(?<!\\)\\\n(?=[^\n])")
+
+
 def finalize_markdown(markdown: str) -> str:
+    """The segments as one document, with math and headings normalized (``format_markdown`` comes last)."""
     saved: list[str] = []
-    protected = _stash(
-        normalize_math(markdown),
-        [(_FENCE_RE, True), (_DISPLAY_MATH_RE, True), (_INLINE_CODE_RE, False), (_INLINE_MATH_RE, False)],
-        saved,
-    )
-    formatted = mdformat.text(protected)
-    formatted = normalize_headings(formatted)
-    formatted = mdformat.text(formatted)
+    protected = _stash(normalize_math(markdown), _PROTECTED_PATTERNS, saved)
+    protected = re.sub(r"\n{3,}", "\n\n", normalize_headings(protected))
+    return _restore(protected, saved).strip() + "\n"
+
+
+def node_executable() -> str | None:
+    """The Node.js of the nodejs-wheel package (installed by ``uv sync``), else ``node`` on PATH."""
+    try:
+        import nodejs_wheel
+    except ImportError:
+        return shutil.which("node")
+    binary = Path(nodejs_wheel.__file__).parent / "bin" / "node"
+    return str(binary) if binary.is_file() else shutil.which("node")
+
+
+def prettier(markdown: str) -> str | None:
+    """``markdown`` formatted by prettier, or None when prettier is not installed or fails."""
+    node = node_executable()
+    if node is None or not PRETTIER.is_file():
+        return None
+    command = [node, str(PRETTIER), "--parser", "markdown", "--no-config", "--no-editorconfig"]
+    try:
+        done = subprocess.run(
+            command, input=markdown, capture_output=True, text=True, encoding="utf-8", timeout=PRETTIER_TIMEOUT
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("prettier could not run: %s", e)
+        return None
+    if done.returncode != 0:
+        logger.warning("prettier failed: %s", done.stderr.strip()[:500])
+        return None
+    return done.stdout
+
+
+def format_markdown(markdown: str) -> str:
+    r"""
+    Format the final Markdown with prettier (mdformat when prettier is missing); math and code are not touched.
+
+    >>> format_markdown("* a $x\\_i * y$\n* b\\\nc")
+    '- a $x\\_i * y$\n- b  \n  c\n'
+    """
+    saved: list[str] = []
+    protected = _stash(markdown, _PROTECTED_PATTERNS, saved)
+    formatted = prettier(protected)
+    if formatted is None:
+        logger.warning("prettier is not available (see README); formatting with mdformat")
+        formatted = mdformat.text(protected)
+    formatted = _BACKSLASH_BREAK_RE.sub("  \n", formatted)  # "a\" + newline is a line break: write it as "a  "
     return _restore(formatted, saved).strip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Section references and spaces between Japanese and English
+# ---------------------------------------------------------------------------
+_JA = "\u3041-\u3096\u30a1-\u30fa\u30fc\u3005\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"  # kana, ー, 々, kanji
+_LATIN = "A-Za-z\u00c0-\u024f"
+_HTML_TAG_RE = re.compile(r"<[A-Za-z/][^<>\n]*>")
+_URL_RE = re.compile(rf"https?://[^\s<>()（）「」、。{_JA}]+")
+_REFERENCE_LIST_RE = re.compile(
+    r"^#{1,2}[ \t]+(?:references?|bibliography)[ \t]*$.*?(?=^#{1,2}[ \t]|\Z)", re.M | re.S | re.I
+)
+_SECTION_REFS = (
+    (re.compile(r"第\s*(\d+(?:\.\d+)*)\s*節"), r"Section \1"),
+    (re.compile(r"(?<![\d.])(\d+(?:\.\d+)*)\s*節(?![点約])"), r"Section \1"),
+    (re.compile(r"セクション\s*(\d+(?:\.\d+)*)"), r"Section \1"),
+    (re.compile(r"(?<![A-Za-z])Sect?\.\s*(?=\d)"), "Section "),
+    (re.compile(r"(?<![A-Za-z])Section\s+Section(?![A-Za-z])"), "Section"),
+)
+_NUMBER_KANJI = "万億兆"  # part of a number (3600万, 1億): no space before it
+_JA_ALNUM_RE = re.compile(
+    rf"(?<=[{_JA}])(?=[{_LATIN}])|(?<=[{_LATIN}])(?=[{_JA}])"
+    rf"|(?<=[{_JA}])(?<![{_NUMBER_KANJI}])(?=[0-9])|(?<=[0-9])(?=[{_JA}])(?![{_NUMBER_KANJI}])"
+)
+_EMPHASIS_RE = re.compile(rf"(?<=[{_LATIN}0-9])(\*{{1,2}})(?=[{_JA}])|(?<=[{_JA}])(\*{{1,2}})(?=[{_LATIN}0-9])")
+_SPACED, _KEPT = ("\ue000", "\ue001"), ("\ue002", "\ue003")  # placeholder brackets (private use)
+_PLACEHOLDER_RE = re.compile("[\ue000\ue002](\\d+)[\ue001\ue003]")
+_BEFORE_SPACED_RE = re.compile(rf"(?<=[{_JA}{_LATIN}0-9])(?=\ue000)")
+_AFTER_SPACED_RE = re.compile(rf"(?<=\ue001)(?=[{_JA}{_LATIN}0-9])")
+
+
+def normalize_text(markdown: str) -> str:
+    """
+    Section references as ``Section 3.2``, and a space between Japanese and English words, numbers,
+    inline code, inline math or URLs (but not before 万, 億 and 兆, which belong to the number).
+    Code blocks, display math, HTML tags and the reference list stay as they are.
+
+    >>> normalize_text("3.2節で述べたTransformerは`f(x)`と$y=4x$を使う（第5.4節）。Table 3の最下段。")
+    'Section 3.2 で述べた Transformer は `f(x)` と $y=4x$ を使う（Section 5.4）。Table 3 の最下段。'
+    >>> normalize_text("**Transformer**は節約し、8基のGPUとhttps://example.com/aで公開する。")
+    '**Transformer** は節約し、8 基の GPU と https://example.com/a で公開する。'
+    >>> normalize_text("約450万の文対と3600万文を12時間で")
+    '約 450万の文対と 3600万文を 12 時間で'
+    """
+    saved: list[str] = []
+
+    def stash(brackets: tuple[str, str]):
+        def replace(match: re.Match) -> str:
+            saved.append(match.group(0))
+            return f"{brackets[0]}{len(saved) - 1}{brackets[1]}"
+
+        return replace
+
+    text = markdown
+    for pattern in (_REFERENCE_LIST_RE, _FENCE_RE, _DISPLAY_MATH_RE, _HTML_TAG_RE):
+        text = pattern.sub(stash(_KEPT), text)
+    for pattern in (_INLINE_CODE_RE, _INLINE_MATH_RE, _URL_RE):
+        text = pattern.sub(stash(_SPACED), text)
+    for pattern, replacement in _SECTION_REFS:
+        text = pattern.sub(replacement, text)
+    text = _EMPHASIS_RE.sub(lambda m: f"{m.group(1)} " if m.group(1) else f" {m.group(2)}", text)
+    text = _JA_ALNUM_RE.sub(" ", text)
+    text = _AFTER_SPACED_RE.sub(" ", _BEFORE_SPACED_RE.sub(" ", text))
+    for _ in range(3):  # a stashed span may hold another placeholder
+        text, count = _PLACEHOLDER_RE.subn(lambda m: saved[int(m.group(1))], text)
+        if not count:
+            break
+    return text
 
 
 def reference_list(entries: list[str]) -> str:

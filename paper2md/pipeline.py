@@ -25,7 +25,7 @@ from .document import parse_pages
 from .figures import export_figures, img_tag, upload_all_to_gyazo
 from .layout import TEXT_LABELS, attach_printed_text, build_segments, crop_segments
 from .llm import OpenAIClient
-from .markdown import finalize_markdown, first_heading
+from .markdown import finalize_markdown, first_heading, format_markdown, normalize_text
 from .pdf import PdfError, render_pages
 from .progress import ProgressFactory, console_progress
 from .textlayer import TextLayer
@@ -107,6 +107,7 @@ def translate_paper(
     figure_paths = export_figures([segments[i].images[0] for i in figure_indices], output_dir / "figures")
     local_figures = {i: img_tag(f"figures/{p.name}", p.name) for i, p in zip(figure_indices, figure_paths, strict=True)}
     markdown = _assemble(len(segments), parts, local_figures)
+    markdown = format_markdown(normalize_text(markdown))
     markdown_path = output_dir / "paper.md"
     markdown_path.write_text(markdown, encoding="utf-8")
 
@@ -127,7 +128,7 @@ def translate_paper(
 
     # 4. Summary
     summarizer = OpenAIClient(settings.summary_model, openai_api_key)
-    summary = summarize(markdown, summarizer, settings)
+    summary = normalize_text(summarize(markdown, summarizer, settings))
     summary_path = output_dir / "summary.md"
     summary_path.write_text(summary, encoding="utf-8")
 
