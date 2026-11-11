@@ -38,15 +38,20 @@ def create_http_app(slack_app: AsyncApp):
     return api
 
 
+async def run_socket_mode(slack_app: AsyncApp, app_token: str) -> None:
+    from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+
+    # Create the handler inside the running loop: it opens an aiohttp session in its constructor.
+    await AsyncSocketModeHandler(slack_app, app_token).start_async()
+
+
 def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.umask(0o077)  # files written by the bot (cache, keys, temp files) are private
     slack_app = create_app()
 
     if app_token := os.getenv("SLACK_APP_TOKEN"):
-        from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-
-        asyncio.run(AsyncSocketModeHandler(slack_app, app_token).start_async())
+        asyncio.run(run_socket_mode(slack_app, app_token))
     else:
         import uvicorn
 
