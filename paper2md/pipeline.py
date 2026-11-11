@@ -21,6 +21,10 @@ Japanese and English (``normalize_text``) -> prettier -> summary.  The two polis
 passes are switched by ``Settings.polish_segments`` / ``polish_document``;
 when polishing fails, the translation is used as it is.
 
+``cancel`` (``cancel.CancelToken``) stops the run with ``Cancelled``: after the
+page being analysed, before each stage, and at once during OpenAI requests.
+``meter`` (``usage.UsageMeter``) collects the tokens and cost of every OpenAI
+request, also of a run that stops early.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cancel import CancelToken
 from .config import Settings
 from .document import parse_pages
 from .figures import export_figures, img_tag, upload_all_to_gyazo
@@ -43,6 +48,7 @@ from .progress import ProgressFactory, console_progress
 from .terms import load_term_list
 from .textlayer import TextLayer
 from .translation import summarize, translate_segments
+from .usage import UsageMeter
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +98,22 @@ def translate_paper(
     gyazo_token: str | None = None,
     settings: Settings | None = None,
     progress: ProgressFactory = console_progress,
+    cancel: CancelToken | None = None,
+    meter: UsageMeter | None = None,
 ) -> PaperResult:
     """Run the whole pipeline; every file is written under ``workdir``."""
     settings = settings or Settings.from_env()
     if not openai_api_key:
         raise ValueError("OpenAI API key is not set.")
+    cancel = cancel or CancelToken()  # never set when nobody can stop the run
+
+    def client(task: str, model: str, **kwargs) -> OpenAIClient:
+        return OpenAIClient(model, openai_api_key, task=task, meter=meter, cancel=cancel, **kwargs)
+
+    def page_done(bar) -> None:
+        bar.update(1)
+        cancel.check()  # the model is unloaded when the analysis stops here
+
     workdir = Path(workdir).resolve()
     output_dir = workdir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -104,6 +121,7 @@ def translate_paper(
     # 1. Layout analysis (pages are rendered once and shared by every stage).
     #    Dolphin reads text only on pages without a text layer (scans).
     pages = render_pages(pdf_path, settings.page_resolution)
+    cancel.check()
     if len(pages) > settings.max_pages:
         raise PdfError(f"ページ数が多すぎます（{len(pages)} ページ、上限 {settings.max_pages} ページ）。")
     with TextLayer(pdf_path, settings.page_resolution) as layer:
@@ -114,7 +132,7 @@ def translate_paper(
                 settings=settings,
                 recognize_labels=TEXT_LABELS,
                 ocr_pages=[i for i in range(len(pages)) if not layer.usable(i)],
-                on_page_done=lambda: bar.update(1),
+                on_page_done=lambda: page_done(bar),
             )
 
         def text_of(element: dict) -> str:
@@ -129,13 +147,12 @@ def translate_paper(
     title = next((s.source_text for s in segments if s.kind == "title" and s.source_text), "")
 
     # 2. Glossary and translation
-    translator = OpenAIClient(
-        settings.translation_model, openai_api_key, max_concurrency=settings.openai_max_concurrency
-    )
+    cancel.check()
+    translator = client("translation", settings.translation_model, max_concurrency=settings.openai_max_concurrency)
     glossary, glossary_list_terms = [], 0
     term_list = load_term_list(settings.term_list) if settings.glossary else None
     if settings.glossary:
-        glossary_maker = OpenAIClient(settings.glossary_model, openai_api_key)
+        glossary_maker = client("glossary", settings.glossary_model)
         with progress(1, "訳語表 作成中") as bar:
             glossary = build_glossary(segments, glossary_maker, settings, title, term_list)
             bar.update(1)
@@ -151,7 +168,7 @@ def translate_paper(
     polish_stats, polish_error = PolishStats(), None
     polished_blocks = polished_document = False
     if settings.polish_segments or settings.polish_document:
-        polisher = OpenAIClient(settings.polish_model, openai_api_key, max_concurrency=settings.openai_max_concurrency)
+        polisher = client("polish", settings.polish_model, max_concurrency=settings.openai_max_concurrency)
     if polisher is not None and settings.polish_segments:
         try:
             parts, polish_stats = polish_segments(segments, parts, polisher, settings, workdir, progress, glossary)
@@ -185,6 +202,7 @@ def translate_paper(
     markdown_path.write_text(markdown, encoding="utf-8")
 
     gyazo_path, gyazo_failures = None, 0
+    cancel.check()
     if gyazo_token and figure_paths:
         urls = upload_all_to_gyazo(figure_paths, gyazo_token)
         gyazo_failures = sum(url is None for url in urls)
@@ -209,7 +227,7 @@ def translate_paper(
         )
 
     # 5. Summary
-    summarizer = OpenAIClient(settings.summary_model, openai_api_key)
+    summarizer = client("summary", settings.summary_model)
     summary = normalize_text(summarize(markdown, summarizer, settings))
     summary_path = output_dir / "summary.md"
     summary_path.write_text(summary, encoding="utf-8")

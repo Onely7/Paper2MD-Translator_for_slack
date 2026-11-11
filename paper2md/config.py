@@ -37,6 +37,14 @@ def _int(name: str, default: int, minimum: int = 1) -> int:
         return default
 
 
+def _float(name: str, default: float | None) -> float | None:
+    try:
+        value = _str(name, None)
+        return float(value) if value is not None else default
+    except ValueError:
+        return default
+
+
 def _bool(name: str, default: bool = False) -> bool:
     value = _str(name, None)
     return default if value is None else value.lower() in {"1", "true", "yes", "on"}
@@ -99,6 +107,7 @@ class Settings:
     keystore_path: Path = REPO_ROOT / "user_keys.db"
     # Slack bot
     max_concurrent_jobs: int = 2
+    usd_jpy_rate: float | None = None  # yen per dollar for the API cost; None: the rate of the day
 
     @classmethod
     def from_env(cls, **overrides) -> Settings:
@@ -133,6 +142,7 @@ class Settings:
             no_cache_dir=Path(no_cache).expanduser() if no_cache else _default_no_cache_dir(),
             keystore_path=_path("KEY_DB_PATH", "user_keys.db"),
             max_concurrent_jobs=_int("MAX_CONCURRENT_JOBS", 2),
+            usd_jpy_rate=_float("USD_JPY_RATE", None),
         )
         known = {f.name for f in fields(cls)}
         unknown = set(overrides) - known

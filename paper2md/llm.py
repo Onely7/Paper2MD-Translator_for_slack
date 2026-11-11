@@ -14,6 +14,10 @@ parameters are adapted per model:
 * other parameters rejected with ``400 Unsupported parameter`` are dropped and
   the request is retried without them.
 
+Every response's ``usage`` goes to the ``UsageMeter`` given to the client
+(``usage.py`` prices it), and a ``CancelToken`` stops a batch at once: the
+requests in flight are dropped and ``Cancelled`` is raised.
+
 Transient errors (connection, 408/409/429/5xx) are retried with exponential
 backoff that honours ``Retry-After``.  Authentication errors, missing models
 and exhausted quota are raised at once.  ``store`` is always ``False`` so
@@ -48,7 +52,9 @@ from openai import (
     RateLimitError,
 )
 
+from .cancel import CancelToken, until_cancelled
 from .models import CATALOG, coerce_effort, is_reasoning_model, parse_gpt_version
+from .usage import UsageMeter
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -206,11 +212,18 @@ class OpenAIClient:
         max_attempts: int = 6,
         first_retry_wait: float = 2.0,
         request_timeout: float = 900.0,
+        task: str = "",
+        meter: UsageMeter | None = None,
+        cancel: CancelToken | None = None,
     ) -> None:
+        """``task``: what the requests are for (the key of ``meter``, e.g. "translation")."""
         if not api_key:
             raise ValueError("OpenAI API key is not set.")
         self.model = model
         self.api_key = api_key
+        self.task = task
+        self.meter = meter
+        self.cancel = cancel
         self.max_concurrency = max(1, int(max_concurrency))
         self.max_attempts = max(1, int(max_attempts))
         self.first_retry_wait = float(first_retry_wait)
@@ -378,6 +391,8 @@ class OpenAIClient:
         while True:
             try:
                 response = await self._with_retries(lambda kw=kw: client.responses.create(model=self.model, **kw))
+                if self.meter is not None:  # every response is billed, also one asked again below
+                    self.meter.add(self.task, self.model, getattr(response, "usage", None))
             except BadRequestError as e:
                 new_kw = self._adapt_to_bad_request(kw, e) if adaptations < 5 else None
                 if new_kw is None:
@@ -436,7 +451,9 @@ class OpenAIClient:
                         logger.exception("on_result callback failed")
                 return result
 
-            return await asyncio.gather(*(one(i, r) for i, r in enumerate(requests)))
+            if self.cancel is not None:
+                self.cancel.check()
+            return await until_cancelled(asyncio.gather(*(one(i, r) for i, r in enumerate(requests))), self.cancel)
 
     # -----------------------------------------------------------------
     # Sync API (called from worker threads)

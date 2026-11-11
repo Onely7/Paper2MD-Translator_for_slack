@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from paper2md.models import TASK_NAMES, TASKS
+from paper2md.usage import UsageMeter
+
 USAGE = (
     "*使い方*\n"
     "Bot を招待したチャンネルで、メンション付きで論文を送ってください。PDF の添付、PDF の URL、"
@@ -17,7 +20,11 @@ USAGE = (
     "```@Paper2MD-Translator --no-cache\nhttps://arxiv.org/abs/0000.00000```\n"
     "*モデル*\n"
     "訳語表、翻訳、推敲（yomiyasu）、要約に使うモデルと Reasoning Effort は、"
-    "Paper2MD-Translator の Home タブの「モデル」で選べます。推敲をしないこともできます。"
+    "Paper2MD-Translator の Home タブの「モデル」で選べます。推敲をしないこともできます。\n"
+    "*処理の中断*\n"
+    "処理を始めるときに投稿するメッセージの「中断する」ボタンで、処理を止められます。押せるのは依頼した人だけです。\n"
+    "*API の料金*\n"
+    "処理が終わると、スレッドの最後に、かかった OpenAI API の料金を円で投稿します。"
 )
 WELCOME = (
     "ご招待ありがとうございます！🎉\n"
@@ -37,6 +44,14 @@ REFRESH_NOTICE = "🔁 `--refresh` が指定されたため、保存済みの結
 SAME_PAPER_WAIT = "⏳ 同じ論文をほかのリクエストで翻訳しています。終わりしだい、その結果を返します。"
 QUEUE_WAIT = "現在混み合っています（待機 {position} 件 / 同時実行 {limit} 件）。順番が来るまで少しお待ちください…🕒"
 QUEUE_START = "✅ 順番が来たので処理を始めます！"
+QUEUE_CANCELLED = "⏹ 順番待ちをやめました。"
+CANCEL_ACTION = "cancel_job"
+CANCELLING = "⏹ 中断しています…"
+CANCELLED = "⏹ 処理を中断しました。結果は保存していません。"
+CANCEL_NOT_ALLOWED = "中断できるのは、この論文の翻訳を依頼した人だけです。"
+CANCEL_TOO_LATE = "この処理はもう終わっているので、中断できません。"
+NO_API_COST = "💴 *OpenAI API の料金*: 0 円（保存済みの結果を返したので、OpenAI の API は使っていません）"
+NO_API_USED = "💴 *OpenAI API の料金*: 0 円（OpenAI の API を使う前に止まりました）"
 SUMMARY_HEADER = "*============================*\n*========　🐾　要約　=========*\n*============================*\n\n"
 RESULT_FILES = "*翻訳結果*（ZIP には Markdown と図表画像が入っています）"
 FIGURES = "*図表*"
@@ -64,6 +79,86 @@ def translating_with(lines: list[str]) -> str:
     """
     items = "\n".join(f"• {line}" for line in lines)
     return f"🤖\n\n{items}\n\nで処理します。"
+
+
+def with_cancel_button(text: str, job_id: str) -> list[dict]:
+    """The first message of a translation, with the 中断する button (``job_id`` names the job)."""
+    button = {
+        "type": "button",
+        "action_id": CANCEL_ACTION,
+        "style": "danger",
+        "text": {"type": "plain_text", "text": "中断する"},
+        "value": job_id,
+        "confirm": {
+            "title": {"type": "plain_text", "text": "処理の中断"},
+            "text": {
+                "type": "plain_text",
+                "text": "この論文の処理を中断しますか？ ここまでにかかった OpenAI の料金は戻りません。",
+            },
+            "confirm": {"type": "plain_text", "text": "中断する"},
+            "deny": {"type": "plain_text", "text": "続ける"},
+        },
+    }
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {"type": "actions", "block_id": CANCEL_ACTION, "elements": [button]},
+    ]
+
+
+def _yen(value: float) -> str:
+    """
+    >>> [_yen(v) for v in (0.042, 3.21, 1234.5)]
+    ['0.04', '3.2', '1,234']
+    """
+    if value < 1:
+        return f"{value:.2f}"
+    if value < 100:
+        return f"{value:.1f}"
+    return f"{value:,.0f}"
+
+
+def _usd(value: float) -> str:
+    return f"${value:.4f}" if value < 1 else f"${value:,.2f}"
+
+
+def api_cost(meter: UsageMeter, rate: float, rate_source: str, complete: bool = True) -> str:
+    """
+    The OpenAI API cost of a translation, by task and model, in yen.
+
+    ``rate_source``: the date of the reference rate, "USD_JPY_RATE" for a fixed rate, "" for the fallback.
+
+    >>> meter = UsageMeter()
+    >>> meter.add("translation", "gpt-6.1-terra", {"input_tokens": 100000, "output_tokens": 10000,
+    ...     "input_tokens_details": {"cached_tokens": 40000}})
+    >>> print(api_cost(meter, 150.0, "2026-11-10"))
+    💴 *OpenAI API の料金*: 約 16.8 円（$0.1120）
+    • 翻訳 `gpt-6.1-terra`: 約 16.8 円（1 回、入力 100,000 トークン（うちキャッシュ 40,000）、出力 10,000 トークン）
+    1 ドル = 150 円（2026-11-10 の欧州中央銀行の参照レート）で換算しました。
+    """
+    lines = [f"💴 *OpenAI API の料金*: 約 {_yen(meter.usd * rate)} 円（{_usd(meter.usd)}）"]
+    for task in TASKS:
+        for (counted_task, model), count in meter.counts.items():
+            if counted_task != task:
+                continue
+            cached = f"（うちキャッシュ {count.cached_tokens:,}）" if count.cached_tokens else ""
+            tokens = f"{count.requests} 回、入力 {count.input_tokens:,} トークン{cached}、出力 {count.output_tokens:,} トークン"
+            price = f"約 {_yen(count.usd * rate)} 円" if count.priced else "単価不明"
+            lines.append(f"• {TASK_NAMES.get(task, task)} `{model}`: {price}（{tokens}）")
+    if not complete:
+        lines.append(
+            "処理が途中で止まったので、止まるまでにかかった料金です。止まったときに処理中だったリクエストの分は含みません。"
+        )
+    if meter.unpriced_models:
+        names = "、".join(f"`{model}`" for model in meter.unpriced_models)
+        lines.append(f"{names} は単価が分からないため、料金に含めていません。")
+    if rate_source == "USD_JPY_RATE":
+        source = "設定した値"
+    elif rate_source:
+        source = f"{rate_source} の欧州中央銀行の参照レート"
+    else:
+        source = "為替レートを取得できなかったため、仮の値"
+    lines.append(f"1 ドル = {rate:g} 円（{source}）で換算しました。")
+    return "\n".join(lines)
 
 
 def polish_skipped(reason: str) -> str:

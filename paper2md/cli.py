@@ -28,6 +28,7 @@ from .config import DEFAULT_TERM_LIST, OFF_VALUES, Settings
 from .models import EFFORT_LEVELS, ModelChoice
 from .pdf import check_limits, fetch_pdf
 from .sources import download_arxiv_pdf, find_paper_ref
+from .usage import UsageMeter, usd_to_jpy
 
 
 def _fetch_source(source: str, pdf_path: Path, settings: Settings) -> None:
@@ -85,12 +86,14 @@ def cmd_translate(args: argparse.Namespace) -> None:
     pdf_path = out / "paper.pdf"
     _fetch_source(args.source, pdf_path, settings)
     check_limits(pdf_path, settings.max_pages, settings.max_pdf_mb)
+    meter = UsageMeter()
     result = translate_paper(
         pdf_path,
         out,
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         gyazo_token=os.getenv("GYAZO_ACCESS_TOKEN") if args.gyazo else None,
         settings=settings,
+        meter=meter,
     )
     print(result.summary)
     print(f"\nMarkdown: {result.gyazo_markdown_path or result.markdown_path}")
@@ -100,6 +103,12 @@ def cmd_translate(args: argparse.Namespace) -> None:
         print(f"Polishing (yomiyasu): {json.dumps(result.polish_stats, ensure_ascii=False)}", file=sys.stderr)
     if result.polish_error:
         print(f"Polishing stopped: {result.polish_error}", file=sys.stderr)
+    rate, source = usd_to_jpy(settings.usd_jpy_rate)
+    print(
+        f"OpenAI API cost: ${meter.usd:.4f} (about {meter.usd * rate:,.1f} JPY at {rate:g} JPY/USD"
+        f"{', ' + source if source else ''}; {meter.requests} requests)",
+        file=sys.stderr,
+    )
 
 
 def cmd_cache_list(args: argparse.Namespace) -> None:

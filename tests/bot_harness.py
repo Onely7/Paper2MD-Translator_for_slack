@@ -57,6 +57,11 @@ class BotHarness:
         self.failed_segments = 0
         self.polish_error = None
         self.pipeline_settings = []  # the Settings each pipeline run got
+        self.stop_in_pipeline = False  # the requester presses 中断する while the pipeline runs
+        self.tokens = []  # the CancelToken each pipeline run got
+        self.blocks: list[list] = []  # the blocks of each posted message ([] without blocks)
+        self.edits: list[dict] = []  # chat_update calls
+        self.ephemeral: list[dict] = []  # chat_postEphemeral calls
         self.arxiv_latest = {"2408.03326": 3}
         self.resolve_fails = False
         self.slack_files: dict[str, bytes] = {}
@@ -65,7 +70,8 @@ class BotHarness:
         self.client = mock.MagicMock()
         self.client.token = "xoxb-test"
         self.client.chat_postMessage = mock.AsyncMock(side_effect=self._post)
-        self.client.chat_update = mock.AsyncMock(return_value={"ok": True})
+        self.client.chat_update = mock.AsyncMock(side_effect=self._update)
+        self.client.chat_postEphemeral = mock.AsyncMock(side_effect=self._ephemeral)
         self.client.files_upload_v2 = mock.AsyncMock(side_effect=self._upload)
         patches = [
             mock.patch.object(request_module, "translate_paper", side_effect=self._pipeline),
@@ -73,6 +79,7 @@ class BotHarness:
             mock.patch.object(request_module, "download_arxiv_pdf", side_effect=self._download_arxiv),
             mock.patch.object(request_module, "fetch_pdf", side_effect=self._fetch),
             mock.patch.object(request_module, "download_slack_file", side_effect=self._download_slack),
+            mock.patch.object(request_module, "usd_to_jpy", return_value=(150.0, "2026-11-10")),
             mock.patch.dict(os.environ, {"PAPER_CACHE_DIR": str(self.cache_dir), "NO_CACHE_WORKDIR": str(self.shm)}),
         ]
         for patcher in patches:
@@ -82,7 +89,16 @@ class BotHarness:
     # ---- fakes ---------------------------------------------------------
     async def _post(self, **kwargs):
         self.posted.append(kwargs["text"])
+        self.blocks.append(kwargs.get("blocks") or [])
         return {"ts": f"{len(self.posted)}.0"}
+
+    async def _update(self, **kwargs):
+        self.edits.append(kwargs)
+        return {"ok": True}
+
+    async def _ephemeral(self, **kwargs):
+        self.ephemeral.append(kwargs)
+        return {"ok": True}
 
     async def _upload(self, **kwargs):
         for item in kwargs["file_uploads"]:
@@ -109,9 +125,14 @@ class BotHarness:
     async def _download_slack(self, url, dest, token, max_bytes):
         Path(dest).write_bytes(self.slack_files[url])
 
-    def _pipeline(self, pdf_path, workdir, *, openai_api_key, gyazo_token, settings, progress):
+    def _pipeline(self, pdf_path, workdir, *, openai_api_key, gyazo_token, settings, progress, cancel, meter):
         self.pipeline_calls += 1
         self.pipeline_settings.append(settings)
+        self.tokens.append(cancel)
+        meter.add("translation", settings.translation_model, {"input_tokens": 100_000, "output_tokens": 10_000})
+        if self.stop_in_pipeline:
+            cancel.cancel()  # as the button handler does
+            cancel.check()
         if self.pipeline_delay:
             time.sleep(self.pipeline_delay)
         out = Path(workdir) / "output"

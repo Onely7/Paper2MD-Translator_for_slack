@@ -23,13 +23,27 @@ logger = logging.getLogger(__name__)
 FILES_PER_UPLOAD = 10  # files_upload_v2 limit per call
 
 
-async def post(client: AsyncWebClient, channel: str, thread_ts: str, text: str) -> str | None:
+async def post(
+    client: AsyncWebClient, channel: str, thread_ts: str, text: str, blocks: list[dict] | None = None
+) -> str | None:
+    """Post to the thread; ``blocks`` (e.g. with a button) are shown instead of ``text`` where supported."""
     try:
-        response = await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+        extra = {"blocks": blocks} if blocks else {}
+        response = await client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text, **extra)
         return response["ts"]
     except SlackApiError as e:
         logger.error("chat_postMessage failed: %s", e.response.get("error"))
         return None
+
+
+async def edit(client: AsyncWebClient, channel: str, ts: str | None, text: str) -> None:
+    """Replace a message with plain ``text`` (its blocks, such as a button, are removed)."""
+    if not ts:
+        return
+    try:
+        await client.chat_update(channel=channel, ts=ts, text=text, blocks=[])
+    except SlackApiError as e:
+        logger.warning("chat_update failed: %s", e.response.get("error"))
 
 
 async def download_slack_file(url: str, dest: Path, token: str, max_bytes: int) -> None:

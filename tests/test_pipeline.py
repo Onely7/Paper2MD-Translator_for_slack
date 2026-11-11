@@ -9,6 +9,7 @@ from unittest import mock
 import pymupdf
 
 from paper2md import pipeline, prompts
+from paper2md.cancel import Cancelled, CancelToken
 from paper2md.config import Settings
 from paper2md.llm import ModelNotAvailableError
 from paper2md.pdf import PdfError, check_limits
@@ -193,6 +194,22 @@ class PipelineTests(unittest.TestCase):
         translation = next(i for i, r in enumerate(FakeClient.requests) if r.get("images"))
         self.assertEqual(FakeClient.models[translation], "gpt-6-luna")
         self.assertEqual((result.glossary_model, result.glossary_effort), ("gpt-6.1-sol", "high"))
+
+    def test_stopped_during_the_layout_analysis(self):
+        token = CancelToken()
+
+        def parse(pages, out_dir, **kwargs):
+            kwargs["on_page_done"]()  # page 1 done; the user stops the job
+            token.cancel()
+            kwargs["on_page_done"]()  # page 2 done: the check stops the analysis here
+            raise AssertionError("not reached")
+
+        self.parse_pages.side_effect = parse
+        with self.assertRaises(Cancelled):
+            pipeline.translate_paper(
+                self.pdf, self.tmp / "work", openai_api_key="sk", settings=self.settings, cancel=token
+            )
+        self.assertEqual(FakeClient.requests, [])  # nothing was sent to OpenAI
 
     def test_text_layer_is_copied(self):
         pdf = make_text_pdf(self.tmp / "text.pdf")

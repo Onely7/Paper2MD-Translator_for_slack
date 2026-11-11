@@ -54,6 +54,8 @@ def error(status, message, param=None, code=None, headers=None):
 class MockOpenAI:
     """Answer the requests of OpenAIClient with ``responder(n, body)``."""
 
+    real = RealAsyncOpenAI
+
     def __init__(self, responder):
         self.requests = []
         self.responder = responder

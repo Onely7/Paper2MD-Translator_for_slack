@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest
 
+from bot import cancel as cancel_module
 from bot import messages
 from bot.request import RequestHandler
 from tests.bot_harness import KEYS, BotHarness, FakeKeyStore, pdf_bytes
@@ -195,14 +196,16 @@ class NoCacheTests(unittest.TestCase):
         self.h.run("<@UBOT> --no-cache <https://arxiv.org/abs/2408.03326>")
         self.assertEqual(self.h.pipeline_calls, 1)
         self.assertEqual((list(self.h.shm.iterdir()), self.h.entries(), self.h.staging_leftovers()), ([], [], []))
-        self.assertEqual((self.h.posted[0], self.h.posted[-1]), (messages.NO_CACHE_NOTICE, messages.NO_CACHE_DONE))
+        self.assertEqual((self.h.posted[0], self.h.posted[-2]), (messages.NO_CACHE_NOTICE, messages.NO_CACHE_DONE))
+        self.assertTrue(self.h.posted[-1].startswith("💴"))  # the API cost comes last
         self.assertEqual(self.h.uploads, RESULT)
 
     def test_cleans_up_on_error(self):
         self.h.pipeline_error = RuntimeError("model crashed")
         self.h.run("<@UBOT> キャッシュなし <https://arxiv.org/abs/2408.03326>")
         self.assertEqual((list(self.h.shm.iterdir()), self.h.entries()), ([], []))
-        self.assertEqual(self.h.posted[-1], messages.NO_CACHE_DONE)
+        self.assertEqual(self.h.posted[-2], messages.NO_CACHE_DONE)
+        self.assertIn("途中で止まった", self.h.posted[-1])
 
     def test_reads_the_cache_but_never_writes(self):
         self.h.run(ARXIV)
@@ -221,6 +224,61 @@ class NoCacheTests(unittest.TestCase):
         self.assertEqual((self.h.entries(), list(self.h.shm.iterdir())), ([], []))
         self.assertFalse((self.h.cache_dir / "_index").exists())
         self.assertEqual(self.h.uploads, ["draft.md", "draft.zip", "fig01.png"])
+
+
+class CancelAndCostTests(unittest.TestCase):
+    def setUp(self):
+        self.h = BotHarness(self)
+
+    def test_the_first_message_carries_the_button_until_the_end(self):
+        self.h.run(ARXIV)
+        index = next(i for i, t in enumerate(self.h.posted) if t.startswith("🤖"))
+        button = self.h.blocks[index][1]["elements"][0]
+        self.assertEqual((button["action_id"], button["value"]), (messages.CANCEL_ACTION, "C1:100.0"))
+        removed = self.h.edits[-1]
+        self.assertEqual(
+            (removed["ts"], removed["blocks"], removed["text"]), (f"{index + 1}.0", [], self.h.posted[index])
+        )
+        # the thread ends with the cost: Terra, 100,000 input and 10,000 output tokens = $0.15
+        self.assertEqual(
+            self.h.posted[-1].splitlines()[:2],
+            [
+                "💴 *OpenAI API の料金*: 約 22.5 円（$0.1500）",
+                "• 翻訳 `gpt-6.1-terra`: 約 22.5 円（1 回、入力 100,000 トークン、出力 10,000 トークン）",
+            ],
+        )
+        self.h.run(ARXIV)  # from the cache: no API cost
+        self.assertEqual(self.h.posted[-1], messages.NO_API_COST)
+
+    def test_stop_while_running(self):
+        self.h.stop_in_pipeline = True
+        self.h.run(ARXIV)
+        self.assertIn(messages.CANCELLED, self.h.posted)
+        self.assertEqual((self.h.entries(), self.h.staging_leftovers()), ([], []))
+        self.assertTrue(self.h.edits[-1]["text"].endswith("⏹ 中断しました。"))
+        self.assertIn("途中で止まった", self.h.posted[-1])  # the cost so far comes last
+        self.assertFalse(any(t.startswith("処理中にエラー") for t in self.h.posted))
+        self.h.stop_in_pipeline = False
+        self.h.run(ARXIV)  # nothing was cached: translated again
+        self.assertEqual(self.h.pipeline_calls, 2)
+
+    def test_only_the_requester_can_stop(self):
+        jobs = cancel_module.RunningJobs()
+        token = cancel_module.CancelToken()
+        jobs.add("C1:100.0", cancel_module.Job(token, "U1", "C1", "5.0", "🤖 text"))
+
+        def press(user, job_id="C1:100.0"):
+            asyncio.run(cancel_module.stop(self.h.client, jobs, job_id, user, "C1", "100.0"))
+
+        press("U2")
+        self.assertFalse(token.cancelled)
+        self.assertEqual(self.h.ephemeral[-1]["text"], messages.CANCEL_NOT_ALLOWED)
+        self.assertEqual(self.h.ephemeral[-1]["user"], "U2")
+        press("U1")
+        self.assertTrue(token.cancelled)
+        self.assertEqual(self.h.edits[-1]["text"], f"🤖 text\n\n{messages.CANCELLING}")
+        press("U1", "C1:999.0")  # a job that has ended
+        self.assertEqual(self.h.ephemeral[-1]["text"], messages.CANCEL_TOO_LATE)
 
 
 if __name__ == "__main__":

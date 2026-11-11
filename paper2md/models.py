@@ -3,7 +3,8 @@ OpenAI models that users can pick, and the reasoning efforts each one accepts.
 
 The catalog follows OpenAI's model pages (November 2026): GPT-6.1 Sol and
 GPT-6 Astra do not accept ``none``; GPT-6 Luna and GPT-6.1 Terra accept every
-level.  Prices are USD per 1M input / output tokens.
+level.  Prices are USD per 1M tokens of the standard tier (``usage.py`` prices
+the requests with them).
 
 Which models are offered is set with ``OPENAI_MODEL_CHOICES`` (comma separated
 IDs, default: the catalog).  A model outside the catalog is shown with its ID;
@@ -26,11 +27,34 @@ _WITHOUT_NONE = EFFORT_LEVELS[1:]
 
 
 @dataclass(frozen=True)
+class Prices:
+    """USD per 1M tokens (standard tier, up to 272K input tokens)."""
+
+    input: float
+    cached_input: float  # read from the prompt cache
+    cache_write: float  # written to the prompt cache (30-minute retention: 1.25x input)
+    output: float  # reasoning tokens included
+
+    @property
+    def text(self) -> str:
+        """
+        >>> Prices(0.1, 0.01, 0.125, 0.5).text
+        '$0.1 / $0.5'
+        """
+        return f"${self.input:g} / ${self.output:g}"
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     id: str
     name: str
-    price: str = ""  # "$1 / $5": input / output per 1M tokens
+    prices: Prices | None = None  # None: unknown (not priced)
     efforts: tuple[str, ...] = EFFORT_LEVELS  # empty: not a reasoning model
+
+    @property
+    def price(self) -> str:
+        """ "$1 / $5": input / output per 1M tokens, shown in the Home tab."""
+        return self.prices.text if self.prices else ""
 
     @property
     def label(self) -> str:
@@ -38,10 +62,10 @@ class ModelSpec:
 
 
 CATALOG = (
-    ModelSpec("gpt-6-luna", "GPT-6 Luna", "$0.1 / $0.5"),
-    ModelSpec("gpt-6.1-terra", "GPT-6.1 Terra", "$1 / $5"),
-    ModelSpec("gpt-6.1-sol", "GPT-6.1 Sol", "$2 / $10", _WITHOUT_NONE),
-    ModelSpec("gpt-6-astra", "GPT-6 Astra", "$10 / $50", _WITHOUT_NONE),
+    ModelSpec("gpt-6-luna", "GPT-6 Luna", Prices(0.1, 0.01, 0.125, 0.5)),
+    ModelSpec("gpt-6.1-terra", "GPT-6.1 Terra", Prices(1, 0.05, 1.25, 5)),
+    ModelSpec("gpt-6.1-sol", "GPT-6.1 Sol", Prices(2, 0.1, 2.5, 10), _WITHOUT_NONE),
+    ModelSpec("gpt-6-astra", "GPT-6 Astra", Prices(10, 1, 12.5, 50), _WITHOUT_NONE),
 )
 DEFAULT_MODEL_CHOICES = tuple(spec.id for spec in CATALOG)
 
@@ -91,7 +115,7 @@ def model_spec(model: str) -> ModelSpec:
     for spec in CATALOG:
         if spec.id == model:
             return spec
-    return ModelSpec(model, model, "", EFFORT_LEVELS if is_reasoning_model(model) else ())
+    return ModelSpec(model, model, None, EFFORT_LEVELS if is_reasoning_model(model) else ())
 
 
 def coerce_effort(model: str, effort: str | None) -> str | None:

@@ -5,6 +5,7 @@ import importlib
 
 MODULES = [
     "cache",
+    "cancel",
     "glossary",
     "layout",
     "llm",
@@ -18,6 +19,7 @@ MODULES = [
     "terms",
     "textlayer",
     "translation",
+    "usage",
 ]
 OTHER_MODULES = ["bot.messages"]
 

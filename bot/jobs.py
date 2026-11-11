@@ -11,6 +11,8 @@ from contextlib import asynccontextmanager
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
+from paper2md.cancel import Cancelled, CancelToken, until_cancelled
+
 from . import messages
 
 logger = logging.getLogger(__name__)
@@ -25,8 +27,20 @@ class JobQueue:
         self._waiting: deque[str] = deque()
         self._running = 0
 
+    async def _acquire(self, cancel: CancelToken | None) -> None:
+        """Wait for a free slot, or raise ``Cancelled`` when the job is stopped while it waits."""
+        acquire = asyncio.ensure_future(self._semaphore.acquire())
+        try:
+            await until_cancelled(acquire, cancel)
+        except Cancelled:
+            if acquire.done() and not acquire.cancelled() and acquire.exception() is None:
+                self._semaphore.release()  # the slot came free at the same moment: give it back
+            raise
+
     @asynccontextmanager
-    async def slot(self, client: AsyncWebClient, channel: str, thread_ts: str, job_id: str) -> AsyncIterator[None]:
+    async def slot(
+        self, client: AsyncWebClient, channel: str, thread_ts: str, job_id: str, cancel: CancelToken | None = None
+    ) -> AsyncIterator[None]:
         self._waiting.append(job_id)
         notice_ts = None
         if self._running + len(self._waiting) > self.limit:
@@ -36,15 +50,21 @@ class JobQueue:
             except SlackApiError as e:
                 logger.warning("chat_postMessage failed: %s", e.response.get("error"))
         try:
-            async with self._semaphore:
-                self._waiting.remove(job_id)
-                self._running += 1
-                try:
-                    if notice_ts:
-                        await self._edit(client, channel, notice_ts, messages.QUEUE_START)
-                    yield
-                finally:
-                    self._running -= 1
+            try:
+                await self._acquire(cancel)
+            except Cancelled:
+                if notice_ts:
+                    await self._edit(client, channel, notice_ts, messages.QUEUE_CANCELLED)
+                raise
+            self._waiting.remove(job_id)
+            self._running += 1
+            try:
+                if notice_ts:
+                    await self._edit(client, channel, notice_ts, messages.QUEUE_START)
+                yield
+            finally:
+                self._running -= 1
+                self._semaphore.release()
         finally:
             if job_id in self._waiting:  # cancelled while waiting
                 self._waiting.remove(job_id)

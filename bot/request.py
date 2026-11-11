@@ -9,6 +9,12 @@ One translation request from Slack.
 ``--no-cache``: everything happens in a private temporary directory that is
 deleted at the end; the cache is read but never written.
 ``--refresh``: the cache is not read; the new result replaces the cached one.
+
+The first message of a translation carries the 中断する button (``cancel.py``):
+the requester can stop the job while it waits for its turn or runs; nothing is
+cached and its files are removed.  The thread ends with the OpenAI API cost of
+the request in yen (``usage.UsageMeter``), also when it stopped early; a paper
+answered from the cache costs nothing.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from slack_sdk import WebClient
 from slack_sdk.web.async_client import AsyncWebClient
 
 from paper2md.cache import CachedPaper, PaperCache
+from paper2md.cancel import Cancelled, CancelToken
 from paper2md.config import Settings
 from paper2md.llm import InsufficientQuotaError, ModelNotAvailableError
 from paper2md.models import ModelChoice
@@ -41,12 +48,14 @@ from paper2md.sources import (
     resolve_latest_arxiv_version,
     sha256_key,
 )
+from paper2md.usage import UsageMeter, usd_to_jpy
 from paper2md.workspace import create_private_workdir, ephemeral_workdir, purge_stale_workdirs, remove_tree
 
 from . import messages
+from .cancel import Job, RunningJobs
 from .jobs import JobQueue, PaperLocks
 from .keystore import KeyStore
-from .slack_io import Deliverable, deliver, download_slack_file, post
+from .slack_io import Deliverable, deliver, download_slack_file, edit, post
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +101,7 @@ class RequestHandler:
         self.keystore = keystore
         self.jobs = JobQueue(Settings.from_env().max_concurrent_jobs)
         self.locks = PaperLocks()
+        self.running = RunningJobs()  # jobs the 中断する button can stop
 
     async def handle(self, client: AsyncWebClient, event: dict, user_id: str) -> None:
         channel = event["channel"]
@@ -112,6 +122,10 @@ class RequestHandler:
         include_pdf = ref.kind != "slack_file"  # do not post the user's own file back
         workdir: Path | None = None
         committed = False
+        job_id = f"{channel}:{event['ts']}"
+        token, meter = CancelToken(), UsageMeter()
+        cost: str | None = None  # "cache": answered from the cache; "api": OpenAI was (or could be) used
+        complete = False
         try:
             # the user's models (Home tab), else the server defaults
             choice = ModelChoice.resolve(await self.keystore.preferences(user_id), settings)
@@ -132,6 +146,7 @@ class RequestHandler:
                 await self._deliver_cached(
                     client, channel, thread_ts, paper, paper.cached, choice, include_pdf, workdir
                 )
+                cost = "cache"
                 return
             await asyncio.to_thread(check_limits, paper.pdf_path, settings.max_pages, settings.max_pdf_mb)
 
@@ -167,17 +182,34 @@ class RequestHandler:
                         await self._deliver_cached(
                             client, channel, thread_ts, paper, cached, choice, include_pdf, workdir
                         )
+                        cost = "cache"
                         return
-                await say(messages.translating_with(choice.lines()))
-                async with self.jobs.slot(client, channel, thread_ts, f"{channel}:{event['ts']}"):
-                    result = await asyncio.to_thread(
-                        translate_paper,
-                        paper.pdf_path,
-                        workdir,
-                        openai_api_key=openai_key,
-                        gyazo_token=gyazo_key,
-                        settings=settings,
-                        progress=slack_progress(WebClient(token=client.token), channel, thread_ts),
+                start_text = messages.translating_with(choice.lines())
+                start_ts = await post(
+                    client, channel, thread_ts, start_text, messages.with_cancel_button(start_text, job_id)
+                )
+                self.running.add(job_id, Job(token, user_id, channel, start_ts, start_text))
+                cost, stopped = "api", False
+                try:
+                    async with self.jobs.slot(client, channel, thread_ts, job_id, cancel=token):
+                        result = await asyncio.to_thread(
+                            translate_paper,
+                            paper.pdf_path,
+                            workdir,
+                            openai_api_key=openai_key,
+                            gyazo_token=gyazo_key,
+                            settings=settings,
+                            progress=slack_progress(WebClient(token=client.token), channel, thread_ts),
+                            cancel=token,
+                            meter=meter,
+                        )
+                except Cancelled:
+                    stopped = True
+                    raise
+                finally:
+                    self.running.remove(job_id)
+                    await edit(
+                        client, channel, start_ts, f"{start_text}\n\n⏹ 中断しました。" if stopped else start_text
                     )
                 # a result with failed segments is posted but not cached
                 if not options.no_cache and result.failed_segments == 0:
@@ -208,6 +240,9 @@ class RequestHandler:
                 await say(messages.polish_skipped(result.polish_error))
             if result.gyazo_failures:
                 await say(messages.gyazo_failures(result.gyazo_failures))
+            complete = True
+        except Cancelled:
+            await say(messages.CANCELLED)
         except Exception as e:
             logger.exception("Processing error")
             await say(messages.error(describe_error(e)))
@@ -218,6 +253,15 @@ class RequestHandler:
                     await say(messages.NO_CACHE_DONE if removed else messages.NO_CACHE_FAILED)
                 else:
                     await asyncio.to_thread(cache.discard, workdir)
+            # the last message of the thread: what the OpenAI API cost
+            if cost == "cache":
+                await say(messages.NO_API_COST)
+            elif cost == "api" and not meter.requests:
+                await say(messages.NO_API_USED)
+            elif cost == "api":
+                rate, source = await asyncio.to_thread(usd_to_jpy, settings.usd_jpy_rate)
+                logger.info("OpenAI API cost of %s: $%.4f in %d requests", job_id, meter.usd, meter.requests)
+                await say(messages.api_cost(meter, rate, source, complete))
 
     async def _identify(
         self,
