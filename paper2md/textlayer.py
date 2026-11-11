@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
@@ -89,6 +90,8 @@ class Line:
     x1: float
     y1: float
     text: str
+    size: float = 0.0  # the largest font size of the line (points)
+    bold: bool = False  # every span is bold
 
     @property
     def height(self) -> float:
@@ -202,7 +205,10 @@ class TextLayer:
                         continue
                     text = fix_accents("".join(span["text"] for span in line["spans"]).translate(LIGATURES))
                     if text.strip():
-                        lines.append(Line(*line["bbox"], text=text))
+                        spans = [span for span in line["spans"] if span["text"].strip()]
+                        size = max(span["size"] for span in spans)
+                        bold = all(span["flags"] & 16 or "bold" in span["font"].lower() for span in spans)
+                        lines.append(Line(*line["bbox"], text=text, size=size, bold=bold))
             self._lines[page] = lines
         return self._lines[page]
 
@@ -235,6 +241,26 @@ class TextLayer:
             for line in self._page_lines(page):
                 words.update(word.lower() for word in _WORD_RE.findall(line.text))
         return frozenset(words)
+
+    @cached_property
+    def body_font_size(self) -> float:
+        """The font size of most of the text, rounded to half points (0 without a text layer)."""
+        sizes: Counter[float] = Counter()
+        for page in range(len(self._doc)):
+            if self.usable(page):
+                for line in self._page_lines(page):
+                    sizes[round(line.size * 2) / 2] += len(line.text.strip())
+        return sizes.most_common(1)[0][0] if sizes else 0.0
+
+    def heading_like(self, page: int, bbox: list[float]) -> bool:
+        """The text in ``bbox`` is set like a heading: short, larger than the body text, and bold or much larger."""
+        lines = self.raw_lines(page, bbox) if self.usable(page) else []
+        text = " ".join(line.text.strip() for line in lines)
+        body = self.body_font_size
+        if not lines or not body or len(text) > 100 or len(text.split()) > 12 or not re.search(r"[A-Za-z]{3}", text):
+            return False
+        size = max(line.size for line in lines)
+        return size >= 1.1 * body and (all(line.bold for line in lines) or size >= 1.3 * body)
 
 
 def _centre_in(line: Line, box: tuple[float, ...]) -> bool:

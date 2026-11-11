@@ -55,6 +55,7 @@ class BotHarness:
         self.pipeline_delay = 0.0
         self.pipeline_error: Exception | None = None
         self.failed_segments = 0
+        self.polish_error = None
         self.pipeline_settings = []  # the Settings each pipeline run got
         self.arxiv_latest = {"2408.03326": 3}
         self.resolve_fails = False
@@ -141,6 +142,13 @@ class BotHarness:
             translation_effort=settings.translation_effort,
             summary_model=settings.summary_model,
             summary_effort=settings.summary_effort,
+            polish_model=settings.polish_model if settings.polish_segments or settings.polish_document else None,
+            polish_effort=settings.polish_effort if settings.polish_segments or settings.polish_document else None,
+            polished_blocks=settings.polish_segments,
+            polished_document=settings.polish_document,
+            polish_error=self.polish_error,
+            glossary_model=settings.glossary_model if settings.glossary else None,
+            glossary_effort=settings.glossary_effort if settings.glossary else None,
         )
 
     # ---- helpers -------------------------------------------------------

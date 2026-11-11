@@ -13,6 +13,8 @@ os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test")
 
 from bot import events, home  # noqa: E402
 from bot.keystore import KeyStore  # noqa: E402
+from paper2md.config import Settings  # noqa: E402
+from paper2md.models import ModelChoice  # noqa: E402
 
 
 class FakeApp:
@@ -122,6 +124,17 @@ def select_options(view, action_id):
     return None
 
 
+def polish_checkboxes(view):
+    """(the values of the polishing checkboxes, the checked ones)."""
+    for block in view["blocks"]:
+        for element in block.get("elements", []):
+            if element.get("action_id") == "pref_polish_scope":
+                return [o["value"] for o in element["options"]], [
+                    o["value"] for o in element.get("initial_options", [])
+                ]
+    return None
+
+
 class ModelMenuTests(unittest.TestCase):
     def setUp(self):
         self.store = KeyStore(Path(tempfile.mkdtemp()) / "keys.db")
@@ -153,6 +166,48 @@ class ModelMenuTests(unittest.TestCase):
         self.assertEqual(self.saved()["translation_effort"], "low")
         self.pick("pref_summary_model", "gpt-unknown")  # not offered: ignored
         self.assertNotIn("summary_model", self.saved())
+
+    def test_polish_menu_and_passes(self):
+        view = home.home_view({})
+        models, current = select_options(view, "pref_polish_model")
+        self.assertEqual(
+            (models, current), (["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"], "gpt-6.1-sol")
+        )
+        self.assertEqual(select_options(view, "pref_polish_effort")[1], "high")
+        options, checked = polish_checkboxes(view)
+        self.assertEqual((options, checked), (["polish_segments", "polish_document"], ["polish_document"]))  # default
+
+        app = FakeApp()
+        home.register(app, self.store)
+        client = mock.MagicMock(views_publish=mock.AsyncMock())
+
+        def check(*names):
+            action = {"selected_options": [{"value": name} for name in names]}
+            asyncio.run(
+                app.listeners["action:pref_polish_scope"](mock.AsyncMock(), {"user": {"id": "U1"}}, action, client)
+            )
+
+        check("polish_segments", "polish_document")
+        self.assertEqual(self.saved(), {"polish_segments": "on", "polish_document": "on"})
+        choice = ModelChoice.resolve(self.saved(), Settings())
+        self.assertEqual(choice.lines()[2], "推敲 `gpt-6.1-sol`（effort: high、ブロックごと＋Markdown 全体）")
+        check()  # nothing checked: no polishing
+        self.assertEqual(ModelChoice.resolve(self.saved(), Settings()).lines()[2], "推敲 なし")
+        self.assertEqual(polish_checkboxes(home.home_view({}, self.saved()))[1], [])
+        client.views_publish.assert_awaited()
+
+    def test_glossary_menu(self):
+        models, current = select_options(home.home_view({}), "pref_glossary_model")
+        self.assertEqual((models[0], current), ("gpt-6-luna", "gpt-6.1-terra"))
+        self.assertEqual(select_options(home.home_view({}), "pref_glossary_effort")[1], "high")
+        self.pick("pref_glossary_model", "gpt-6.1-sol")
+        self.assertEqual(self.saved(), {"glossary_model": "gpt-6.1-sol", "glossary_effort": "high"})
+        choice = ModelChoice.resolve(self.saved(), Settings())
+        self.assertEqual(choice.lines()[0], "訳語表 `gpt-6.1-sol`（effort: high）")
+        self.assertEqual(choice.apply(Settings()).glossary_model, "gpt-6.1-sol")
+        # a server without glossaries offers no menu for it
+        self.assertIsNone(select_options(home.home_view({}, settings=Settings(glossary=False)), "pref_glossary_model"))
+        self.assertNotIn("訳語表", ModelChoice.resolve(self.saved(), Settings(glossary=False)).describe())
 
     def test_reset_listener(self):
         app = FakeApp()

@@ -3,6 +3,8 @@ __pycache__
 .ipynb_checkpoints
 
 # project specific
+# the lab's term list (TERM_LIST, paper2md/terms.py): built from textbooks, kept out of this public repository
+/references/
 output/
 outputs/
 results/

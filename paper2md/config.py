@@ -17,7 +17,12 @@ from .models import DEFAULT_MODEL_CHOICES
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_TRANSLATION_MODEL = "gpt-6.1-terra"
+DEFAULT_POLISH_MODEL = "gpt-6.1-sol"
+DEFAULT_GLOSSARY_MODEL = "gpt-6.1-terra"
 DEFAULT_SUMMARY_MODEL = "gpt-6.1-sol"
+# the lab's term list (paper2md/terms.py); references/ is not committed
+DEFAULT_TERM_LIST = "references/AI・機械学習・統計学・NLP・CV・音声_用語と表記の一覧.tsv"
+OFF_VALUES = frozenset({"0", "false", "no", "off", "none"})
 
 
 def _str(name: str, default: str | None) -> str | None:
@@ -48,6 +53,11 @@ def _path(name: str, default: str) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
+def _optional_path(name: str, default: str) -> Path | None:
+    """A path, or None when the variable is set to off (or 0, none, ...)."""
+    return None if _str(name, default).lower() in OFF_VALUES else _path(name, default)
+
+
 def _default_no_cache_dir() -> Path | None:
     shm = Path("/dev/shm")
     return shm if shm.is_dir() and os.access(shm, os.W_OK | os.X_OK) else None
@@ -58,8 +68,16 @@ class Settings:
     # OpenAI
     translation_model: str = DEFAULT_TRANSLATION_MODEL
     summary_model: str = DEFAULT_SUMMARY_MODEL
-    translation_effort: str | None = "none"
-    summary_effort: str | None = "medium"
+    translation_effort: str | None = "high"
+    summary_effort: str | None = "high"
+    polish_model: str = DEFAULT_POLISH_MODEL  # yomiyasu polishing
+    polish_effort: str | None = "high"
+    polish_segments: bool = False  # polish every block (many requests, so off by default)
+    polish_document: bool = True  # polish the whole Markdown
+    glossary: bool = True  # build a glossary of the paper's terms before translating
+    glossary_model: str = DEFAULT_GLOSSARY_MODEL  # the model that makes it
+    glossary_effort: str | None = "high"
+    term_list: Path | None = None  # the lab's term list (TSV) used for the glossary; from_env: DEFAULT_TERM_LIST
     model_choices: tuple[str, ...] = DEFAULT_MODEL_CHOICES  # offered in the Slack Home tab
     image_detail: str = "auto"
     openai_max_concurrency: int = 8
@@ -88,8 +106,16 @@ class Settings:
         settings = cls(
             translation_model=_str("TRANSLATION_MODEL", DEFAULT_TRANSLATION_MODEL),
             summary_model=_str("SUMMARY_MODEL", DEFAULT_SUMMARY_MODEL),
-            translation_effort=_str("TRANSLATION_REASONING_EFFORT", "none"),
-            summary_effort=_str("SUMMARY_REASONING_EFFORT", "medium"),
+            translation_effort=_str("TRANSLATION_REASONING_EFFORT", "high"),
+            summary_effort=_str("SUMMARY_REASONING_EFFORT", "high"),
+            polish_model=_str("POLISH_MODEL", DEFAULT_POLISH_MODEL),
+            polish_effort=_str("POLISH_REASONING_EFFORT", "high"),
+            polish_segments=_bool("POLISH_SEGMENTS", False),
+            polish_document=_bool("POLISH_DOCUMENT", True),
+            glossary=_bool("TRANSLATION_GLOSSARY", True),
+            glossary_model=_str("GLOSSARY_MODEL", DEFAULT_GLOSSARY_MODEL),
+            glossary_effort=_str("GLOSSARY_REASONING_EFFORT", "high"),
+            term_list=_optional_path("TERM_LIST", DEFAULT_TERM_LIST),
             model_choices=_list("OPENAI_MODEL_CHOICES", DEFAULT_MODEL_CHOICES),
             image_detail=_str("TRANSLATION_IMAGE_DETAIL", "auto"),
             openai_max_concurrency=_int("OPENAI_MAX_CONCURRENCY", 8),

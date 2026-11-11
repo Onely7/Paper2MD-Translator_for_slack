@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .cache import PaperCache
-from .config import Settings
+from .config import DEFAULT_TERM_LIST, OFF_VALUES, Settings
 from .models import EFFORT_LEVELS, ModelChoice
 from .pdf import check_limits, fetch_pdf
 from .sources import download_arxiv_pdf, find_paper_ref
@@ -49,20 +49,36 @@ def cmd_translate(args: argparse.Namespace) -> None:
     from .pipeline import translate_paper  # imports torch; keep `cache` commands fast
 
     defaults = Settings.from_env()
+    if args.glossary is not None:  # before the models: a glossary model is chosen only when one is made
+        defaults = replace(defaults, glossary=args.glossary)
     choice = ModelChoice.resolve(
         {
             "translation_model": args.translation_model,
             "translation_effort": args.translation_effort,
             "summary_model": args.summary_model,
             "summary_effort": args.summary_effort,
+            "polish_model": args.polish_model,
+            "glossary_model": args.glossary_model,
+            "glossary_effort": args.glossary_effort,
+            "polish_effort": args.polish_effort,
+            **{
+                name: None if value is None else ("on" if value else "off")
+                for name, value in (("polish_segments", args.polish_blocks), ("polish_document", args.polish_document))
+            },
         },
         # any model may be given on the command line, not only the ones offered in Slack
         replace(
             defaults,
-            model_choices=(*defaults.model_choices, *filter(None, (args.translation_model, args.summary_model))),
+            model_choices=(
+                *defaults.model_choices,
+                *filter(None, (args.translation_model, args.summary_model, args.polish_model, args.glossary_model)),
+            ),
         ),
     )
     settings = choice.apply(defaults)
+    if args.term_list is not None:
+        off = args.term_list.strip().lower() in OFF_VALUES
+        settings = replace(settings, term_list=None if off else Path(args.term_list).expanduser().resolve())
     print(f"Models: {choice.describe()}", file=sys.stderr)
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -80,12 +96,20 @@ def cmd_translate(args: argparse.Namespace) -> None:
     print(f"\nMarkdown: {result.gyazo_markdown_path or result.markdown_path}")
     if result.failed_segments:
         print(f"Failed segments: {result.failed_segments}")
+    if result.polish_stats:
+        print(f"Polishing (yomiyasu): {json.dumps(result.polish_stats, ensure_ascii=False)}", file=sys.stderr)
+    if result.polish_error:
+        print(f"Polishing stopped: {result.polish_error}", file=sys.stderr)
 
 
 def cmd_cache_list(args: argparse.Namespace) -> None:
     for entry in PaperCache().entries():
         model = f"{entry.translation_model}/{entry.translation_effort or '-'}"
-        print(f"{entry.key}\t{entry.created_date}\t{model}\t{entry.title or entry.display_name}")
+        scope = "+".join(
+            name for name, on in (("blocks", entry.polish_segments), ("document", entry.polish_document)) if on
+        )
+        polish = f"{entry.polish_model}/{entry.polish_effort or '-'}/{scope}" if entry.polish_model else "no polish"
+        print(f"{entry.key}\t{entry.created_date}\t{model}\t{polish}\t{entry.title or entry.display_name}")
 
 
 def cmd_cache_show(args: argparse.Namespace) -> None:
@@ -128,11 +152,39 @@ def main(argv: list[str] | None = None) -> None:
     translate.add_argument("--gyazo", action="store_true", help="also write a Markdown with Gyazo image URLs")
     translate.add_argument("--translation-model", help="default: $TRANSLATION_MODEL or gpt-6.1-terra")
     translate.add_argument(
-        "--translation-effort", choices=EFFORT_LEVELS, help="default: $TRANSLATION_REASONING_EFFORT or none"
+        "--translation-effort", choices=EFFORT_LEVELS, help="default: $TRANSLATION_REASONING_EFFORT or high"
     )
     translate.add_argument("--summary-model", help="default: $SUMMARY_MODEL or gpt-6.1-sol")
+    translate.add_argument("--summary-effort", choices=EFFORT_LEVELS, help="default: $SUMMARY_REASONING_EFFORT or high")
     translate.add_argument(
-        "--summary-effort", choices=EFFORT_LEVELS, help="default: $SUMMARY_REASONING_EFFORT or medium"
+        "--polish-model", help="model of the yomiyasu polishing (default: $POLISH_MODEL or gpt-6.1-sol)"
+    )
+    translate.add_argument("--polish-effort", choices=EFFORT_LEVELS, help="default: $POLISH_REASONING_EFFORT or high")
+    translate.add_argument(
+        "--polish-blocks",
+        action=argparse.BooleanOptionalAction,
+        help="polish every block with yomiyasu (default: $POLISH_SEGMENTS or off)",
+    )
+    translate.add_argument(
+        "--polish-document",
+        action=argparse.BooleanOptionalAction,
+        help="polish the whole Markdown with yomiyasu (default: $POLISH_DOCUMENT or on)",
+    )
+    translate.add_argument(
+        "--glossary",
+        action=argparse.BooleanOptionalAction,
+        help="make a glossary of the paper's terms first (default: $TRANSLATION_GLOSSARY or on)",
+    )
+    translate.add_argument(
+        "--glossary-model", help="model that makes the glossary (default: $GLOSSARY_MODEL or gpt-6.1-terra)"
+    )
+    translate.add_argument(
+        "--glossary-effort", choices=EFFORT_LEVELS, help="default: $GLOSSARY_REASONING_EFFORT or high"
+    )
+    translate.add_argument(
+        "--term-list",
+        metavar="TSV",
+        help=f"the lab's term list used for the glossary, or off (default: $TERM_LIST or {DEFAULT_TERM_LIST})",
     )
     translate.set_defaults(func=cmd_translate)
 

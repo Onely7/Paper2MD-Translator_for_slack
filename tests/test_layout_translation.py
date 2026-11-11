@@ -175,11 +175,19 @@ class TranslationTests(unittest.TestCase):
         self.assertNotIn(7, parts)  # the figure
         translation = fake.requests[-1]
         self.assertEqual(translation["instructions"], prompts.TRANSLATION_INSTRUCTIONS)
-        self.assertEqual(translation["gen_kwargs"]["reasoning_effort"], "none")
+        self.assertEqual(translation["gen_kwargs"]["reasoning_effort"], "high")
         intro = fake.requests[3]["text"]  # the introduction: the paper title and its section are given
         self.assertIn("論文: Attention Is All You Need", intro)
         self.assertIn("節: 1 Introduction", intro)
         self.assertNotIn("節:", fake.requests[0]["text"])  # the notice above the first heading
+
+    def test_a_repeated_section_heading_is_dropped(self):
+        # the model wrote the section heading given in the request, which is a segment of its own
+        def answer(request):
+            return "## 1 Introduction\n\n翻訳" if "節: 1 Introduction" in request["text"] else None
+
+        parts, _ = translate_segments(self.segments, FakeClient(answer), self.settings)
+        self.assertEqual((parts[5], parts[6]), ("## 1 Introduction", "翻訳"))
 
     def test_failures_are_marked(self):
         error = openai.APIConnectionError(request=None)

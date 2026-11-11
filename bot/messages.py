@@ -16,7 +16,8 @@ USAGE = (
     "結果を投稿したあとすべて削除します。\n"
     "```@Paper2MD-Translator --no-cache\nhttps://arxiv.org/abs/0000.00000```\n"
     "*モデル*\n"
-    "翻訳と要約に使うモデルと Reasoning Effort は、Paper2MD-Translator の Home タブの「モデル」で選べます。"
+    "訳語表、翻訳、推敲（yomiyasu）、要約に使うモデルと Reasoning Effort は、"
+    "Paper2MD-Translator の Home タブの「モデル」で選べます。推敲をしないこともできます。"
 )
 WELCOME = (
     "ご招待ありがとうございます！🎉\n"
@@ -49,8 +50,24 @@ def cache_hit(subject: str, date: str, cached_models: str, current_models: str |
     return text + "翻訳し直すときは、`--refresh` を付けて送ってください。"
 
 
-def translating_with(models: str) -> str:
-    return f"🤖 {models} で翻訳します。"
+def translating_with(lines: list[str]) -> str:
+    """
+    The models used, one task per line (``ModelChoice.lines()``).
+
+    >>> print(translating_with(["翻訳 `gpt-6-luna`（effort: medium）", "要約 `gpt-6.1-sol`（effort: medium）"]))
+    🤖
+    <BLANKLINE>
+    • 翻訳 `gpt-6-luna`（effort: medium）
+    • 要約 `gpt-6.1-sol`（effort: medium）
+    <BLANKLINE>
+    で処理します。
+    """
+    items = "\n".join(f"• {line}" for line in lines)
+    return f"🤖\n\n{items}\n\nで処理します。"
+
+
+def polish_skipped(reason: str) -> str:
+    return f"⚠️ yomiyasu による推敲を途中でやめ、推敲していない訳文を使いました（{reason}）。"
 
 
 def effort_changed(model_name: str, before: str, after: str) -> str:

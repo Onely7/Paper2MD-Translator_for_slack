@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import aiohttp
@@ -168,7 +168,7 @@ class RequestHandler:
                             client, channel, thread_ts, paper, cached, choice, include_pdf, workdir
                         )
                         return
-                await say(messages.translating_with(choice.describe()))
+                await say(messages.translating_with(choice.lines()))
                 async with self.jobs.slot(client, channel, thread_ts, f"{channel}:{event['ts']}"):
                     result = await asyncio.to_thread(
                         translate_paper,
@@ -204,6 +204,8 @@ class RequestHandler:
                 await deliver(client, channel, thread_ts, deliverable, workdir)
             if result.failed_segments:
                 await say(messages.failed_segments(result.failed_segments, options.no_cache))
+            if result.polish_error:
+                await say(messages.polish_skipped(result.polish_error))
             if result.gyazo_failures:
                 await say(messages.gyazo_failures(result.gyazo_failures))
         except Exception as e:
@@ -273,9 +275,21 @@ class RequestHandler:
         else:
             subject = "この PDF は"
         cached = ModelChoice(
-            entry.translation_model, entry.translation_effort, entry.summary_model, entry.summary_effort
+            entry.translation_model,
+            entry.translation_effort,
+            entry.summary_model,
+            entry.summary_effort,
+            entry.polish_model or "",
+            entry.polish_effort,
+            entry.polish_segments,
+            entry.polish_document,
+            entry.glossary_model,
+            entry.glossary_effort,
         )
-        current = None if cached == choice else choice.describe()
+        compared = choice
+        if not cached.glossary_model:  # no glossary, or stored before its model was recorded: not compared
+            compared = replace(choice, glossary_model="", glossary_effort=None)
+        current = None if cached.normalized() == compared.normalized() else choice.describe()
         await post(
             client, channel, thread_ts, messages.cache_hit(subject, entry.created_date, cached.describe(), current)
         )

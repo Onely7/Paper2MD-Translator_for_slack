@@ -18,6 +18,8 @@ import os
 from slack_bolt.async_app import AsyncApp
 
 from bot import create_app
+from paper2md.config import Settings
+from paper2md.terms import load_term_list
 
 
 def create_http_app(slack_app: AsyncApp):
@@ -48,6 +50,9 @@ async def run_socket_mode(slack_app: AsyncApp, app_token: str) -> None:
 def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     os.umask(0o077)  # files written by the bot (cache, keys, temp files) are private
+    settings = Settings.from_env()
+    if settings.glossary:
+        load_term_list(settings.term_list)  # read once now, not in the first request (read again when it changes)
     slack_app = create_app()
 
     if app_token := os.getenv("SLACK_APP_TOKEN"):

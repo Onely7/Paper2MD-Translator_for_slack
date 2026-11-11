@@ -50,7 +50,7 @@ class CacheCommandTests(unittest.TestCase):
 
     def test_list_show_remove_prune(self):
         listing = self.run_cli("cache", "list")
-        self.assertIn("arxiv:1111.11111v1\t2020-01-01\tgpt-6.1-terra/none\tT", listing)
+        self.assertIn("arxiv:1111.11111v1\t2020-01-01\tgpt-6.1-terra/none\tno polish\tT", listing)
         self.assertIn('"key": "arxiv:2222.22222v1"', self.run_cli("cache", "show", "arxiv:2222.22222v1"))
         self.assertIn("removed arxiv:1111.11111v1", self.run_cli("cache", "prune", "--older-than", "30"))
         self.assertEqual([e.key for e in self.cache.entries()], ["arxiv:2222.22222v1"])

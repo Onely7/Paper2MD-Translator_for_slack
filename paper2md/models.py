@@ -45,6 +45,13 @@ CATALOG = (
 )
 DEFAULT_MODEL_CHOICES = tuple(spec.id for spec in CATALOG)
 
+# The tasks a model is chosen for, in the order they run.
+TASKS = ("glossary", "translation", "polish", "summary")
+TASK_NAMES = {"glossary": "訳語表", "translation": "翻訳", "polish": "推敲", "summary": "要約"}
+# The two yomiyasu polishing passes, each switched on or off: every block (paragraph, caption, ...) on its
+# own, and the whole Markdown.  The block pass sends many requests, so it is off by default.
+POLISH_SCOPES = {"polish_segments": "ブロックごと", "polish_document": "Markdown 全体"}
+
 
 # ---------------------------------------------------------------------------
 # Model families
@@ -120,7 +127,12 @@ def lowest_effort(model: str) -> str | None:
 # ---------------------------------------------------------------------------
 # A user's choice
 # ---------------------------------------------------------------------------
-PREFERENCE_NAMES = ("translation_model", "translation_effort", "summary_model", "summary_effort")
+PREFERENCE_NAMES = (*(f"{task}_{field}" for task in TASKS for field in ("model", "effort")), *POLISH_SCOPES)
+
+
+def _switch(value: str | None, default: bool) -> bool:
+    """A saved on/off preference ("on" / "off"), or ``default``."""
+    return default if value not in ("on", "off") else value == "on"
 
 
 @dataclass(frozen=True)
@@ -131,13 +143,29 @@ class ModelChoice:
     translation_effort: str | None
     summary_model: str
     summary_effort: str | None
+    polish_model: str = ""
+    polish_effort: str | None = None
+    polish_segments: bool = False  # yomiyasu polishing of every block
+    polish_document: bool = False  # yomiyasu polishing of the whole Markdown
+    glossary_model: str = ""  # "": no glossary is made (or, for a stored result, not known)
+    glossary_effort: str | None = None
+
+    @property
+    def polishes(self) -> bool:
+        return self.polish_segments or self.polish_document
+
+    def normalized(self) -> ModelChoice:
+        """The same choice, without a polish model when nothing is polished (for comparing choices)."""
+        return self if self.polishes else replace(self, polish_model="", polish_effort=None)
 
     @classmethod
     def resolve(cls, saved: Mapping[str, str] | None, settings: Settings) -> ModelChoice:
         """Saved values that are still valid; the server defaults (``settings``) for the rest."""
         saved = saved or {}
-        values = {}
-        for task in ("translation", "summary"):
+        values: dict = {}
+        for task in TASKS:
+            if task == "glossary" and not settings.glossary:
+                continue  # no glossary is made: nothing to choose
             default_model = getattr(settings, f"{task}_model")
             model = saved.get(f"{task}_model") or default_model
             if model not in settings.model_choices and model != default_model:
@@ -145,33 +173,51 @@ class ModelChoice:
             effort = saved.get(f"{task}_effort") or getattr(settings, f"{task}_effort")
             values[f"{task}_model"] = model
             values[f"{task}_effort"] = coerce_effort(model, effort)
+        for name in POLISH_SCOPES:
+            values[name] = _switch(saved.get(name), getattr(settings, name))
         return cls(**values)
 
     def apply(self, settings: Settings) -> Settings:
-        return replace(
-            settings,
-            translation_model=self.translation_model,
-            translation_effort=self.translation_effort,
-            summary_model=self.summary_model,
-            summary_effort=self.summary_effort,
-        )
+        tasks = [task for task in TASKS if task != "glossary" or self.glossary_model]
+        names = [f"{task}_{field}" for task in tasks for field in ("model", "effort")] + list(POLISH_SCOPES)
+        return replace(settings, **{name: getattr(self, name) for name in names})
+
+    def lines(self) -> list[str]:
+        """
+        One line per task, in the order they run.
+
+        >>> ModelChoice("gpt-6-luna", "medium", "gpt-6.1-sol", "medium", "gpt-6.1-terra", "low", False, True).lines()
+        ['翻訳 `gpt-6-luna`（effort: medium）', '推敲 `gpt-6.1-terra`（effort: low、Markdown 全体）', '要約 `gpt-6.1-sol`（effort: medium）']
+        >>> ModelChoice("a", None, "b", None, "gpt-6.1-terra", "low", True, True).lines()[1]
+        '推敲 `gpt-6.1-terra`（effort: low、ブロックごと＋Markdown 全体）'
+        >>> ModelChoice("gpt-6.1-terra", "none", "gpt-6.1-sol", "medium").lines()[1]
+        '推敲 なし'
+        >>> ModelChoice("a", None, "b", None, glossary_model="gpt-6.1-terra", glossary_effort="low").lines()[0]
+        '訳語表 `gpt-6.1-terra`（effort: low）'
+        """
+        out = []
+        for task in TASKS:
+            model, effort = getattr(self, f"{task}_model"), getattr(self, f"{task}_effort")
+            if task == "glossary" and not model:
+                continue
+            notes = [f"effort: {effort}"] if effort else []
+            if task == "polish":
+                if not self.polishes:
+                    out.append(f"{TASK_NAMES[task]} なし")
+                    continue
+                notes.append("＋".join(label for name, label in POLISH_SCOPES.items() if getattr(self, name)))
+            out.append(f"{TASK_NAMES[task]} `{model}`" + (f"（{'、'.join(notes)}）" if notes else ""))
+        return out
 
     def describe(self) -> str:
         """
         >>> ModelChoice("gpt-6.1-terra", "none", "gpt-6.1-sol", "medium").describe()
-        '翻訳 `gpt-6.1-terra`（effort: none）、要約 `gpt-6.1-sol`（effort: medium）'
+        '翻訳 `gpt-6.1-terra`（effort: none）、推敲 なし、要約 `gpt-6.1-sol`（effort: medium）'
         """
-
-        def one(model: str, effort: str | None) -> str:
-            return f"`{model}`（effort: {effort}）" if effort else f"`{model}`"
-
-        return (
-            f"翻訳 {one(self.translation_model, self.translation_effort)}、"
-            f"要約 {one(self.summary_model, self.summary_effort)}"
-        )
+        return "、".join(self.lines())
 
 
 def offered_models(settings: Settings) -> list[ModelSpec]:
     """The models shown in the Home tab: ``OPENAI_MODEL_CHOICES`` plus the server defaults."""
-    ids = list(dict.fromkeys([*settings.model_choices, settings.translation_model, settings.summary_model]))
-    return [model_spec(model) for model in ids]
+    defaults = [getattr(settings, f"{task}_model") for task in TASKS]
+    return [model_spec(model) for model in dict.fromkeys([*settings.model_choices, *defaults])]

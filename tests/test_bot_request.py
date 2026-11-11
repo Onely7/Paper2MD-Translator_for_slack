@@ -90,7 +90,7 @@ class CacheTests(unittest.TestCase):
         self.h.run(ARXIV, preferences=sol)
         self.assertEqual(self.h.pipeline_calls, 2)
         hit = [t for t in self.h.posted if t.startswith("♻️")][-1]
-        self.assertIn("`gpt-6.1-sol`（effort: low）", hit)  # the stored result was made with Sol
+        self.assertIn("`gpt-6.1-sol`（effort: high）", hit)  # the stored result was made with Sol
         self.assertNotIn("今の設定", hit)  # ... which is also the user's choice
 
     def test_user_models_reach_the_pipeline(self):
@@ -110,12 +110,43 @@ class CacheTests(unittest.TestCase):
         manifest = json.loads((self.h.cache_dir / "arxiv-2408.03326v3/manifest.json").read_text())
         self.assertEqual((manifest["translation_model"], manifest["summary_effort"]), ("gpt-6.1-sol", "max"))
 
+    def test_first_message_lists_the_models(self):
+        self.h.run(ARXIV)
+        started = next(t for t in self.h.posted if t.startswith("🤖"))
+        self.assertEqual(
+            started,
+            "🤖\n\n• 訳語表 `gpt-6.1-terra`（effort: high）\n• 翻訳 `gpt-6.1-terra`（effort: high）\n"
+            "• 推敲 `gpt-6.1-sol`（effort: high、Markdown 全体）\n• 要約 `gpt-6.1-sol`（effort: high）\n\nで処理します。",
+        )
+        manifest = json.loads((self.h.cache_dir / "arxiv-2408.03326v3/manifest.json").read_text())
+        self.assertEqual((manifest["polish_model"], manifest["polish_effort"]), ("gpt-6.1-sol", "high"))
+        self.assertEqual((manifest["polish_segments"], manifest["polish_document"]), (False, True))
+
+    def test_polishing_switched_off(self):
+        off = {"polish_segments": "off", "polish_document": "off"}
+        self.h.run(ARXIV, preferences=off)
+        self.assertTrue(any("• 推敲 なし" in t for t in self.h.posted))
+        settings = self.h.pipeline_settings[0]
+        self.assertEqual((settings.polish_segments, settings.polish_document), (False, False))
+        self.h.run(ARXIV, preferences=off)  # the stored result (not polished) matches the choice
+        self.assertNotIn("今の設定", [t for t in self.h.posted if t.startswith("♻️")][-1])
+        self.h.run(ARXIV)  # the default polishes the whole Markdown: the bot says how to translate again
+        self.assertIn("今の設定", [t for t in self.h.posted if t.startswith("♻️")][-1])
+
+    def test_polish_error_is_reported(self):
+        self.h.polish_error = "ModelNotAvailableError: no"
+        self.h.run(ARXIV)
+        self.assertTrue(any("推敲していない訳文" in t and "ModelNotAvailableError" in t for t in self.h.posted))
+
     def test_cache_hit_tells_the_models(self):
         self.h.run(ARXIV)
         self.h.run(ARXIV, preferences={"translation_model": "gpt-6-astra", "translation_effort": "high"})
         hit = [t for t in self.h.posted if t.startswith("♻️")][-1]
-        self.assertIn("`gpt-6.1-terra`（effort: none）", hit)
-        self.assertIn("今の設定（翻訳 `gpt-6-astra`（effort: high）", hit)
+        self.assertIn("今の設定（訳語表 `gpt-6.1-terra`（effort: high）、翻訳 `gpt-6-astra`（effort: high）", hit)
+        self.assertIn(
+            "保存済みの結果を返します（訳語表 `gpt-6.1-terra`（effort: high）、翻訳 `gpt-6.1-terra`（effort: high）",
+            hit,
+        )
         self.assertEqual(self.h.pipeline_calls, 1)  # the stored result is still returned
 
     def test_partial_failure_is_not_cached(self):

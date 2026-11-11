@@ -134,10 +134,16 @@ class Segment:
     images: list[str] = field(default_factory=list)  # crop of each region
     source_text: str = ""  # title / heading as printed
     entries: list[str] = field(default_factory=list)  # reference entries as printed
+    layer_text: str = ""  # text blocks: the PDF's own text of the region (a hint for the translation)
 
     @property
     def text(self) -> str:
         return "\n".join(t for t in self.texts if t)
+
+    @property
+    def english(self) -> str:
+        """The English of a text block: the PDF's own text, else Dolphin's ("" when neither was read)."""
+        return self.layer_text or self.text
 
     @property
     def level(self) -> int:
@@ -350,13 +356,47 @@ def clean_ocr_text(text: str) -> str:
     return join_lines(re.sub(r"^#+\s*", "", line).strip().strip("*_").strip() for line in text.splitlines())
 
 
+def promote_header_headings(recognition: dict, layer: TextLayer) -> list[str]:
+    """
+    Turn page headers that are really headings into headings; return their text.
+
+    Dolphin-v2 sometimes labels a heading at the top of a page "header" (the
+    appendix title "Attention Visualizations" of 1706.03762), and headers are
+    dropped.  A header becomes a heading when no other page has the same text in
+    its header or footer (so it is not a running header) and the text layer
+    shows it in a heading font (``TextLayer.heading_like``).
+    """
+    pages_with: dict[str, set[int]] = {}
+    headers = []
+    for page, page_data in enumerate(recognition.get("pages", [])):
+        for element in page_data.get("elements", []):
+            if element.get("label") not in ("header", "foot"):
+                continue
+            text = layer.text(page, element["bbox"])
+            key = re.sub(r"[\W\d_]+", " ", text).strip().lower()  # page numbers do not count
+            pages_with.setdefault(key, set()).add(page)
+            if element["label"] == "header" and key:
+                headers.append((page, element, text, key))
+    promoted = []
+    for page, element, text, key in headers:
+        if len(pages_with[key]) == 1 and layer.heading_like(page, element["bbox"]):
+            element["label"] = "sec_1"
+            promoted.append(text)
+    return promoted
+
+
 def attach_printed_text(segments: list[Segment], layer: TextLayer | None) -> None:
-    """Fill the title and headings (``source_text``) and the reference entries (``entries``).
+    """Fill the title and headings (``source_text``), the reference entries (``entries``) and,
+    for text blocks, the PDF's own text of the region (``layer_text``).
 
     The text comes from the PDF's text layer, or from Dolphin's OCR on pages
     without one.  What stays empty is transcribed from the images by the model.
     """
     for segment in segments:
+        if segment.kind == "text" and layer is not None:
+            texts = (layer.text(e["page"], e["bbox"]) for e in segment.elements if e.get("label") != "equ")
+            segment.layer_text = "\n".join(text for text in texts if text)
+            continue
         if segment.kind in ("title", "heading"):
             parts = []
             for element, ocr in zip(segment.elements, segment.texts, strict=True):

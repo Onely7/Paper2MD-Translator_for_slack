@@ -11,7 +11,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from paper2md.config import Settings
-from paper2md.models import ModelChoice, coerce_effort, model_spec, offered_models
+from paper2md.models import POLISH_SCOPES, ModelChoice, coerce_effort, model_spec, offered_models
 
 from . import messages
 from .keystore import PROVIDERS, KeyStore
@@ -20,17 +20,31 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_NAMES = {"openai": "OpenAI", "gyazo": "Gyazo"}
 PROVIDER_NOTES = {
-    "openai": "必須。翻訳と要約に使います。",
+    "openai": "必須。翻訳、推敲、要約に使います。",
     "gyazo": "任意。登録すると、Markdown 内の図表が Gyazo の画像 URL になります。",
 }
-TASKS = {"translation": ("翻訳", "本文の翻訳に使います。"), "summary": ("要約", "要約の作成に使います。")}
+TASKS = {
+    "glossary": ("訳語表", "翻訳の前に、論文の主な用語の訳語表を作るのに使います。"),
+    "translation": ("翻訳", "本文の翻訳に使います。"),
+    "polish": ("推敲", "yomiyasu で訳文の日本語を整えるのに使います。推敲するかどうかは、下のチェックで選べます。"),
+    "summary": ("要約", "要約の作成に使います。"),
+}
+POLISH_SCOPE_OPTIONS = {
+    "polish_segments": (
+        "ブロックごとに推敲する",
+        "翻訳した段落や図表の説明を、一つずつ推敲します。リクエストが多いので、料金が高くなります。",
+    ),
+    "polish_document": ("Markdown 全体を推敲する", "まとめた論文の全体を推敲します。"),
+}
 MODEL_NOTE = (
     "括弧内は 100 万トークンあたりの料金（入力 / 出力）です。"
     "選べる Reasoning Effort はモデルによって違います（GPT-6.1 Sol と GPT-6 Astra では none を選べません）。"
     "Reasoning Effort を上げると精度が上がることがありますが、時間と料金が増えます。"
+    "推敲のリクエストには毎回 yomiyasu の指示（約 4 万トークン）が付くので、入力のトークンが多くなります。"
 )
 VALIDATION_TIMEOUT = 2.0  # a modal submission must be acknowledged within 3 seconds
-_PREFERENCE_ACTION_RE = re.compile(r"^pref_(translation|summary)_(model|effort)$")
+_PREFERENCE_ACTION_RE = re.compile(r"^pref_(glossary|translation|polish|summary)_(model|effort)$")
+POLISH_SCOPE_ACTION = "pref_polish_scope"
 
 
 def _mask(key: str) -> str:
@@ -125,14 +139,35 @@ def _model_actions(task: str, model: str, effort: str | None, settings: Settings
     return {"type": "actions", "block_id": f"pref_{task}_{model}"[:255], "elements": elements}
 
 
+def _polish_scope_actions(choice: ModelChoice) -> dict:
+    """Checkboxes for the two yomiyasu passes (both unchecked: no polishing)."""
+    options = {
+        name: {
+            "text": {"type": "mrkdwn", "text": f"*{label}*"},
+            "description": {"type": "mrkdwn", "text": description},
+            "value": name,
+        }
+        for name, (label, description) in POLISH_SCOPE_OPTIONS.items()
+    }
+    checkboxes = {"type": "checkboxes", "action_id": POLISH_SCOPE_ACTION, "options": list(options.values())}
+    selected = [option for name, option in options.items() if getattr(choice, name)]
+    if selected:  # Slack rejects an empty initial_options
+        checkboxes["initial_options"] = selected
+    return {"type": "actions", "block_id": POLISH_SCOPE_ACTION, "elements": [checkboxes]}
+
+
 def _model_blocks(preferences: dict[str, str], settings: Settings, notice: str | None) -> list[dict]:
     choice = ModelChoice.resolve(preferences, settings)
     blocks: list[dict] = [{"type": "divider"}, {"type": "header", "text": {"type": "plain_text", "text": "モデル"}}]
     for task, (name, note) in TASKS.items():
+        if task == "glossary" and not settings.glossary:
+            continue  # the server makes no glossary
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{name}*　{note}"}})
         blocks.append(
             _model_actions(task, getattr(choice, f"{task}_model"), getattr(choice, f"{task}_effort"), settings)
         )
+        if task == "polish":
+            blocks.append(_polish_scope_actions(choice))
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": MODEL_NOTE}]})
     if notice:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"ℹ️ {notice}"}})
@@ -208,7 +243,7 @@ async def change_preference(keystore: KeyStore, user_id: str, action_id: str, va
         if value not in {spec.id for spec in offered_models(settings)}:
             return None
         current = getattr(choice, f"{task}_effort")
-        effort = coerce_effort(value, current)
+        effort = coerce_effort(value, current or getattr(settings, f"{task}_effort"))
         await keystore.set_preferences(user_id, {f"{task}_model": value, f"{task}_effort": effort})
         if current and effort and effort != current:
             return messages.effort_changed(model_spec(value).name, current, effort)
@@ -216,6 +251,11 @@ async def change_preference(keystore: KeyStore, user_id: str, action_id: str, va
     if value in model_spec(getattr(choice, f"{task}_model")).efforts:
         await keystore.set_preferences(user_id, {f"{task}_effort": value})
     return None
+
+
+async def change_polish_scope(keystore: KeyStore, user_id: str, selected: list[str]) -> None:
+    """Save which yomiyasu passes are checked in the Home tab (every pass is saved, checked or not)."""
+    await keystore.set_preferences(user_id, {name: "on" if name in selected else "off" for name in POLISH_SCOPES})
 
 
 def register(app: AsyncApp, keystore: KeyStore) -> None:
@@ -247,6 +287,13 @@ def register(app: AsyncApp, keystore: KeyStore) -> None:
         value = (action.get("selected_option") or {}).get("value", "")
         notice = await change_preference(keystore, user_id, action["action_id"], value)
         await publish(client, user_id, notice)
+
+    @app.action(POLISH_SCOPE_ACTION)
+    async def pick_polish_scope(ack, body, action, client):
+        await ack()
+        user_id = body["user"]["id"]
+        await change_polish_scope(keystore, user_id, [o["value"] for o in action.get("selected_options") or []])
+        await publish(client, user_id)
 
     @app.action("pref_reset")
     async def reset_models(ack, body, client):

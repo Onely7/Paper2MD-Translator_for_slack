@@ -4,13 +4,23 @@ PDF -> Japanese Markdown + summary.
     workdir/
         dolphin/recognition.json   Dolphin-v2 layout analysis
         crops/                     page regions sent to the translation model
-        segments.jsonl             segments and their translations (for debugging)
+        segments.jsonl             segments with their translation and polished text (for debugging)
+        glossary.json              the glossary of the paper's terms (when one was made), with the
+                                   term list's renderings of the terms the list has
         output/
             paper.md               Markdown; figures linked as figures/figNN.png
                                    (title, headings and references copied from the PDF)
             paper.gyazo.md         the same with Gyazo image URLs (with a Gyazo token)
             figures/figNN.png
             summary.md
+
+Steps: layout analysis (Dolphin-v2) -> glossary (``Settings.glossary_model``) -> translation of each block
+-> [yomiyasu polishing of each block] -> one Markdown document -> [yomiyasu
+polishing of the whole Markdown] -> section references and spaces between
+Japanese and English (``normalize_text``) -> prettier -> summary.  The two polishing
+passes are switched by ``Settings.polish_segments`` / ``polish_document``;
+when polishing fails, the translation is used as it is.
+
 """
 
 from __future__ import annotations
@@ -23,11 +33,14 @@ from pathlib import Path
 from .config import Settings
 from .document import parse_pages
 from .figures import export_figures, img_tag, upload_all_to_gyazo
-from .layout import TEXT_LABELS, attach_printed_text, build_segments, crop_segments
+from .glossary import build_glossary, glossary_records
+from .layout import TEXT_LABELS, attach_printed_text, build_segments, crop_segments, promote_header_headings
 from .llm import OpenAIClient
 from .markdown import finalize_markdown, first_heading, format_markdown, normalize_text
 from .pdf import PdfError, render_pages
+from .polish import PolishStats, polish_document, polish_segments
 from .progress import ProgressFactory, console_progress
+from .terms import load_term_list
 from .textlayer import TextLayer
 from .translation import summarize, translate_segments
 
@@ -48,11 +61,27 @@ class PaperResult:
     translation_effort: str | None = None
     summary_model: str = ""
     summary_effort: str | None = None
+    polish_model: str | None = None  # None: not polished
+    polish_effort: str | None = None
+    polished_blocks: bool = False  # the yomiyasu passes that ran
+    polished_document: bool = False
+    polish_stats: dict | None = None  # PolishStats.to_json()
+    polish_error: str | None = None  # why polishing stopped (the translation is used as it is)
+    glossary_terms: int = 0  # terms in the glossary used for the translation
+    glossary_model: str | None = None  # the model that made the glossary (None: no glossary)
+    glossary_effort: str | None = None
+    glossary_list_terms: int = 0  # of which rendered as the term list renders them
+    term_list: str | None = None  # the term list used for the glossary (file name and digest)
 
 
 def _assemble(count: int, parts: dict[int, str], figures: dict[int, str]) -> str:
     """Markdown of all segments in order (figures as <img> tags)."""
     return finalize_markdown("\n\n".join(filter(None, (figures.get(i) or parts.get(i, "") for i in range(count)))))
+
+
+def _polish_failure(error: Exception) -> str:
+    logger.warning("Polishing stopped: %s: %s", type(error).__name__, error)
+    return f"{type(error).__name__}: {error}"[:300]
 
 
 def translate_paper(
@@ -91,22 +120,66 @@ def translate_paper(
         def text_of(element: dict) -> str:
             return layer.text(element["page"], element["bbox"]) or element["text"]
 
+        if promoted := promote_header_headings(recognition, layer):
+            logger.info("Page headers used as headings: %s", promoted)
         segments = build_segments(recognition, page_height=max(page.height for page in pages), text_of=text_of)
         attach_printed_text(segments, layer)
     crop_segments(segments, pages, workdir / "crops")
     del pages
+    title = next((s.source_text for s in segments if s.kind == "title" and s.source_text), "")
 
-    # 2. Translation
+    # 2. Glossary and translation
     translator = OpenAIClient(
         settings.translation_model, openai_api_key, max_concurrency=settings.openai_max_concurrency
     )
-    parts, failed = translate_segments(segments, translator, settings, progress)
+    glossary, glossary_list_terms = [], 0
+    term_list = load_term_list(settings.term_list) if settings.glossary else None
+    if settings.glossary:
+        glossary_maker = OpenAIClient(settings.glossary_model, openai_api_key)
+        with progress(1, "訳語表 作成中") as bar:
+            glossary = build_glossary(segments, glossary_maker, settings, title, term_list)
+            bar.update(1)
+        if glossary:
+            records = glossary_records(glossary, term_list)
+            (workdir / "glossary.json").write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+            glossary_list_terms = term_list.check(glossary) if term_list else 0
+    parts, failed = translate_segments(segments, translator, settings, progress, glossary)
+    translations = dict(parts)
 
-    # 3. Markdown with figures
+    # 3. yomiyasu polishing of each block
+    polisher: OpenAIClient | None = None
+    polish_stats, polish_error = PolishStats(), None
+    polished_blocks = polished_document = False
+    if settings.polish_segments or settings.polish_document:
+        polisher = OpenAIClient(settings.polish_model, openai_api_key, max_concurrency=settings.openai_max_concurrency)
+    if polisher is not None and settings.polish_segments:
+        try:
+            parts, polish_stats = polish_segments(segments, parts, polisher, settings, workdir, progress, glossary)
+            polished_blocks = True
+        except Exception as e:
+            polisher, parts, polish_error = None, translations, _polish_failure(e)
+
+    # 4. Markdown with figures, yomiyasu polishing of the whole Markdown, prettier
     figure_indices = [i for i, s in enumerate(segments) if s.kind == "figure" and s.images]
     figure_paths = export_figures([segments[i].images[0] for i in figure_indices], output_dir / "figures")
     local_figures = {i: img_tag(f"figures/{p.name}", p.name) for i, p in zip(figure_indices, figure_paths, strict=True)}
     markdown = _assemble(len(segments), parts, local_figures)
+    if polisher is not None and settings.polish_document:
+        try:
+            markdown, polish_stats = polish_document(
+                markdown,
+                polisher,
+                settings,
+                workdir,
+                first_heading(markdown) or title,
+                progress,
+                polish_stats,
+                glossary,
+                after_blocks=polished_blocks,
+            )
+            polished_document = True
+        except Exception as e:
+            polish_error = _polish_failure(e)
     markdown = format_markdown(normalize_text(markdown))
     markdown_path = output_dir / "paper.md"
     markdown_path.write_text(markdown, encoding="utf-8")
@@ -124,9 +197,18 @@ def translate_paper(
 
     with (workdir / "segments.jsonl").open("w", encoding="utf-8") as f:
         for index, segment in enumerate(segments):
-            f.write(json.dumps({**segment.to_json(), "markdown": parts.get(index)}, ensure_ascii=False) + "\n")
+            record = {**segment.to_json(), "translation": translations.get(index), "markdown": parts.get(index)}
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    polished = polished_blocks or polished_document
+    if settings.polish_segments or settings.polish_document:
+        logger.info(
+            "Glossary: %d terms (%d as in the term list); polishing: %s",
+            len(glossary),
+            glossary_list_terms,
+            polish_stats.to_json(),
+        )
 
-    # 4. Summary
+    # 5. Summary
     summarizer = OpenAIClient(settings.summary_model, openai_api_key)
     summary = normalize_text(summarize(markdown, summarizer, settings))
     summary_path = output_dir / "summary.md"
@@ -145,4 +227,15 @@ def translate_paper(
         translation_effort=settings.translation_effort,
         summary_model=settings.summary_model,
         summary_effort=settings.summary_effort,
+        polish_model=settings.polish_model if polished else None,
+        polish_effort=settings.polish_effort if polished else None,
+        polished_blocks=polished_blocks,
+        polished_document=polished_document,
+        polish_stats=polish_stats.to_json() if polished else None,
+        polish_error=polish_error,
+        glossary_terms=len(glossary),
+        glossary_model=settings.glossary_model if glossary else None,
+        glossary_effort=settings.glossary_effort if glossary else None,
+        glossary_list_terms=glossary_list_terms,
+        term_list=term_list.label if term_list else None,
     )

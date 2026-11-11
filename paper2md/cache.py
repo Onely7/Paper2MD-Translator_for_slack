@@ -41,7 +41,11 @@ if TYPE_CHECKING:  # avoid importing torch for cache-only use (e.g. the CLI)
 
 logger = logging.getLogger(__name__)
 
-CACHE_FORMAT_VERSION = 3  # 3: models with their reasoning efforts; references and headings as printed
+# 3: models with their reasoning efforts; references and headings as printed
+# 4: yomiyasu polishing (polish_model / polish_effort / polish_segments / polish_document / polish), glossary
+#    (with the term list: glossary_list_terms, term_list),
+#    PDF text sent with the images, headings set as page headers, underscores of names in math, prettier
+CACHE_FORMAT_VERSION = 4
 _ENTRY_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -135,6 +139,34 @@ class CachedPaper:
     @property
     def summary_effort(self) -> str | None:
         return self.manifest.get("summary_effort")
+
+    @property
+    def polish_model(self) -> str | None:
+        """None: the result was not polished with yomiyasu."""
+        return self.manifest.get("polish_model")
+
+    @property
+    def polish_effort(self) -> str | None:
+        return self.manifest.get("polish_effort")
+
+    @property
+    def glossary_model(self) -> str:
+        """ "": no glossary, or a result stored before the glossary model was recorded."""
+        return self.manifest.get("glossary_model") or ""
+
+    @property
+    def glossary_effort(self) -> str | None:
+        return self.manifest.get("glossary_effort")
+
+    @property
+    def polish_segments(self) -> bool:
+        """The result was polished block by block."""
+        return bool(self.manifest.get("polish_segments"))
+
+    @property
+    def polish_document(self) -> bool:
+        """The result was polished as a whole."""
+        return bool(self.manifest.get("polish_document"))
 
 
 class PaperCache:
@@ -248,6 +280,16 @@ class PaperCache:
             "translation_effort": result.translation_effort,
             "summary_model": result.summary_model,
             "summary_effort": result.summary_effort,
+            "polish_model": result.polish_model,
+            "polish_effort": result.polish_effort,
+            "polish_segments": result.polished_blocks,
+            "polish_document": result.polished_document,
+            "polish": result.polish_stats,
+            "glossary_terms": result.glossary_terms,
+            "glossary_model": result.glossary_model,
+            "glossary_effort": result.glossary_effort,
+            "glossary_list_terms": result.glossary_list_terms,
+            "term_list": result.term_list,
             **(info or {}),
             "files": files,
         }
