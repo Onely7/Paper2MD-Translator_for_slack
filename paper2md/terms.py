@@ -442,8 +442,11 @@ class TermList:
         terms = sorted((self.terms[i] for i in indices), key=lambda t: (-t.weight, t.ja))
         return list(dict.fromkeys(term.ja for term in terms))
 
-    def check(self, glossary: Glossary) -> int:
-        """Log each glossary rendering that the list does not have for its term; return how many follow the list."""
+    def check(self, glossary: Glossary, log: bool = True) -> int:
+        """
+        How many glossary renderings follow the list.  ``log``: log each rendering that the list does not
+        have for its term (off for --no-cache, whose log leaves out the paper's words).
+        """
         following = 0
         for en, ja in glossary:
             listed = self.renderings(en)
@@ -451,7 +454,7 @@ class TermList:
                 continue
             if "".join(ja.split()) in {"".join(item.split()) for item in listed}:
                 following += 1
-            else:
+            elif log:
                 logger.info("Glossary: %s -> %s, but the term list has %s", en, ja, " / ".join(listed[:4]))
         return following
 

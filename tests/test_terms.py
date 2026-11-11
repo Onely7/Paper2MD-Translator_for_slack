@@ -124,6 +124,8 @@ class TermListTests(unittest.TestCase):
             self.assertEqual(self.terms.check(glossary), 1)
         self.assertEqual(len(logs.output), 1)
         self.assertIn("attention -> アテンション, but the term list has 注意機構", logs.output[0])
+        with self.assertNoLogs("paper2md.terms", "INFO"):  # --no-cache: the paper's words stay out of the log
+            self.assertEqual(self.terms.check(glossary, log=False), 1)
 
     def test_mentioned(self):
         glossary = [

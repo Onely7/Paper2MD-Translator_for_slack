@@ -7,7 +7,8 @@ One translation request from Slack.
    jobs at once), store the result in the cache and post it.
 
 ``--no-cache``: everything happens in a private temporary directory that is
-deleted at the end; the cache is read but never written.
+deleted at the end; the cache is read but never written, and the log leaves
+out the paper's title, file name and words (``Settings.log_paper_text``).
 ``--refresh``: the cache is not read; the new result replaces the cached one.
 
 Gyazo (the Home tab checkbox, on by default): the figures of a new translation
@@ -140,6 +141,7 @@ class RequestHandler:
             gyazo_key = await self.keystore.get(user_id, "gyazo")
             gyazo_token = gyazo_key if gyazo_enabled(preferences) else None
             if options.no_cache:
+                settings = replace(settings, log_paper_text=False)  # the log leaves out the paper's words
                 await say(messages.NO_CACHE_NOTICE)
                 await asyncio.to_thread(purge_stale_workdirs)
                 workdir = await asyncio.to_thread(create_private_workdir)

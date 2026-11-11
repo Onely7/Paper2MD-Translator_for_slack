@@ -104,6 +104,7 @@ class Settings:
     # storage
     cache_dir: Path = REPO_ROOT / "data/cache"
     no_cache_dir: Path | None = None  # default: /dev/shm, else the system temp dir
+    log_paper_text: bool = True  # False for --no-cache: the log leaves out the paper's words (terms, page headers)
     keystore_path: Path = REPO_ROOT / "user_keys.db"
     # Slack bot
     max_concurrent_jobs: int = 2

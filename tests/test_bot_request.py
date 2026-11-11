@@ -137,6 +137,7 @@ class CacheTests(unittest.TestCase):
         self.assertTrue(any(t.startswith("🤖") and "`gpt-6.1-sol`（effort: low）" in t for t in self.h.posted))
         manifest = json.loads((self.h.cache_dir / "arxiv-2408.03326v3/manifest.json").read_text())
         self.assertEqual((manifest["translation_model"], manifest["summary_effort"]), ("gpt-6.1-sol", "max"))
+        self.assertTrue(settings.log_paper_text)  # only --no-cache leaves the paper's words out of the log
 
     def test_first_message_lists_the_models(self):
         self.h.run(ARXIV)
@@ -226,6 +227,7 @@ class NoCacheTests(unittest.TestCase):
         self.assertEqual((self.h.posted[0], self.h.posted[-2]), (messages.NO_CACHE_NOTICE, messages.NO_CACHE_DONE))
         self.assertTrue(self.h.posted[-1].startswith("💴"))  # the API cost comes last
         self.assertEqual(self.h.uploads, RESULT)
+        self.assertFalse(self.h.pipeline_settings[0].log_paper_text)  # the log leaves out the paper's words
 
     def test_cleans_up_on_error(self):
         self.h.pipeline_error = RuntimeError("model crashed")

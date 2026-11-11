@@ -161,7 +161,7 @@ def translate_paper(
             return layer.text(element["page"], element["bbox"]) or element["text"]
 
         if promoted := promote_header_headings(recognition, layer):
-            logger.info("Page headers used as headings: %s", promoted)
+            logger.info("Page headers used as headings: %s", promoted if settings.log_paper_text else len(promoted))
         segments = build_segments(recognition, page_height=max(page.height for page in pages), text_of=text_of)
         attach_printed_text(segments, layer)
     crop_segments(segments, pages, workdir / "crops")
@@ -181,7 +181,7 @@ def translate_paper(
         if glossary:
             records = glossary_records(glossary, term_list)
             (workdir / "glossary.json").write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
-            glossary_list_terms = term_list.check(glossary) if term_list else 0
+            glossary_list_terms = term_list.check(glossary, log=settings.log_paper_text) if term_list else 0
     parts, failed = translate_segments(segments, translator, settings, progress, glossary)
     translations = dict(parts)
 

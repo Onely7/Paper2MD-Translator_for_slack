@@ -308,7 +308,8 @@ def prettier(markdown: str) -> str | None:
         logger.warning("prettier could not run: %s", e)
         return None
     if done.returncode != 0:
-        logger.warning("prettier failed: %s", done.stderr.strip()[:500])
+        # the first line only: the next ones quote the Markdown around the error (the paper's text)
+        logger.warning("prettier failed: %s", (done.stderr.strip().splitlines() or [""])[0][:300])
         return None
     return done.stdout
 
