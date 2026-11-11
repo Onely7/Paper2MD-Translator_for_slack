@@ -9,6 +9,7 @@ dependencies = [
     "aiohttp>=3.12.13",
     "fastapi>=0.115.13",
     "mdformat>=0.7.22",
+    "nodejs-wheel>=24.19.0",  # Node.js for prettier (tools/prettier)
     "numpy<2.0",
     "openai>=2.6.0,<3",
     "opencv-python==4.11.0.86",

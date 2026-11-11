@@ -1,0 +1,9 @@
+{
+  "name": "paper2md-prettier",
+  "private": true,
+  "description": "prettier for the final Markdown of paper2md. Install: uv run npm ci --prefix tools/prettier",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "prettier": "3.9.10"
+  }
+}
