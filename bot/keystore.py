@@ -17,6 +17,19 @@ from paper2md.config import Settings
 from paper2md.models import PREFERENCE_NAMES
 
 PROVIDERS = ("openai", "gyazo")
+GYAZO_SETTING = "gyazo"  # "on" / "off": upload the figures to Gyazo (Home tab); on when not saved
+SETTING_NAMES = (*PREFERENCE_NAMES, GYAZO_SETTING)
+
+
+def gyazo_enabled(preferences: dict[str, str]) -> bool:
+    """
+    Whether the user's figures go to Gyazo (when they have registered a token).
+
+    >>> gyazo_enabled({}), gyazo_enabled({"gyazo": "off"})
+    (True, False)
+    """
+    return preferences.get(GYAZO_SETTING) != "off"
+
 
 _CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS user_keys (
@@ -99,10 +112,10 @@ class KeyStore:
         rows = (
             self._connect().execute("SELECT name, value FROM user_preferences WHERE user_id = ?", (user_id,)).fetchall()
         )
-        return {name: value for name, value in rows if name in PREFERENCE_NAMES}
+        return {name: value for name, value in rows if name in SETTING_NAMES}
 
     def _set_preferences(self, user_id: str, values: dict[str, str | None]) -> None:
-        unknown = set(values) - set(PREFERENCE_NAMES)
+        unknown = set(values) - set(SETTING_NAMES)
         if unknown:
             raise ValueError(f"Unknown preferences: {sorted(unknown)}")
         conn = self._connect()
@@ -123,9 +136,13 @@ class KeyStore:
         _restrict_permissions(self.path)
 
     def _clear_preferences(self, user_id: str) -> None:
+        """Forget the model choices (the Gyazo switch is not a model choice and stays)."""
         conn = self._connect()
         with self._lock:
-            conn.execute("DELETE FROM user_preferences WHERE user_id = ?", (user_id,))
+            conn.executemany(
+                "DELETE FROM user_preferences WHERE user_id = ? AND name = ?",
+                [(user_id, name) for name in PREFERENCE_NAMES],
+            )
             conn.commit()
 
     async def get(self, user_id: str, provider: str) -> str | None:

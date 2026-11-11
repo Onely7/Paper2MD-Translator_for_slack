@@ -211,6 +211,20 @@ class PipelineTests(unittest.TestCase):
             )
         self.assertEqual(FakeClient.requests, [])  # nothing was sent to OpenAI
 
+    def test_gyazo_markdown_only_when_a_figure_went_up(self):
+        out = self.tmp / "out"
+        (out / "figures").mkdir(parents=True)
+        markdown = out / "paper.md"
+        markdown.write_text('<img src="figures/fig01.png" width=60% alt="fig01.png">\n')
+        figures = [out / "figures/fig01.png", out / "figures/fig02.png"]
+        with mock.patch.object(pipeline, "upload_all_to_gyazo", return_value=["https://i.gyazo.com/a.png", None]):
+            path, failures = pipeline.write_gyazo_markdown(markdown, figures, "g", out / "paper.gyazo.md")
+        self.assertEqual(failures, 1)
+        self.assertIn("https://i.gyazo.com/a.png", path.read_text())
+        with mock.patch.object(pipeline, "upload_all_to_gyazo", return_value=[None, None]):
+            self.assertEqual(pipeline.write_gyazo_markdown(markdown, figures, "g", out / "x.md"), (None, 2))
+        self.assertFalse((out / "x.md").exists())
+
     def test_text_layer_is_copied(self):
         pdf = make_text_pdf(self.tmp / "text.pdf")
         self.parse_pages.return_value = TEXT_RECOGNITION

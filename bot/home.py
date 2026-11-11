@@ -1,4 +1,7 @@
-"""Home tab: the user's API keys and the models (with reasoning effort) used for their requests."""
+"""
+Home tab: the user's API keys, whether their figures go to Gyazo, and the models
+(with reasoning effort) used for their requests.
+"""
 
 from __future__ import annotations
 
@@ -11,17 +14,17 @@ from slack_bolt.async_app import AsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
 
 from paper2md.config import Settings
-from paper2md.models import POLISH_SCOPES, ModelChoice, coerce_effort, model_spec, offered_models
+from paper2md.models import POLISH_SCOPES, PREFERENCE_NAMES, ModelChoice, coerce_effort, model_spec, offered_models
 
 from . import messages
-from .keystore import PROVIDERS, KeyStore
+from .keystore import GYAZO_SETTING, PROVIDERS, KeyStore, gyazo_enabled
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAMES = {"openai": "OpenAI", "gyazo": "Gyazo"}
 PROVIDER_NOTES = {
     "openai": "必須。翻訳、推敲、要約に使います。",
-    "gyazo": "任意。登録すると、Markdown 内の図表が Gyazo の画像 URL になります。",
+    "gyazo": "任意。登録すると、図表を Gyazo にアップロードし、Markdown 内の図表を Gyazo の画像 URL にします。",
 }
 TASKS = {
     "glossary": ("訳語表", "翻訳の前に、論文の主な用語の訳語表を作るのに使います。"),
@@ -42,9 +45,15 @@ MODEL_NOTE = (
     "Reasoning Effort を上げると精度が上がることがありますが、時間と料金が増えます。"
     "推敲のリクエストには毎回 yomiyasu の指示（約 4 万トークン）が付くので、入力のトークンが多くなります。"
 )
+GYAZO_OPTION = (
+    "図表を Gyazo にアップロードする",
+    "外すと Gyazo を使わず、Markdown の図表は ZIP の中の画像を指します。保存済みの論文でも同じです。",
+)
+OPTION_TEXT_LIMIT = 75  # Slack: the text and the description of a checkbox option
 VALIDATION_TIMEOUT = 2.0  # a modal submission must be acknowledged within 3 seconds
 _PREFERENCE_ACTION_RE = re.compile(r"^pref_(glossary|translation|polish|summary)_(model|effort)$")
 POLISH_SCOPE_ACTION = "pref_polish_scope"
+GYAZO_ACTION = "pref_gyazo"
 
 
 def _mask(key: str) -> str:
@@ -76,7 +85,21 @@ async def validate_key(provider: str, key: str) -> str | None:
     return None
 
 
-def _key_blocks(keys: dict[str, str | None]) -> list[dict]:
+def _gyazo_actions(enabled: bool) -> dict:
+    """The checkbox that switches the Gyazo upload (shown once a Gyazo token is registered)."""
+    label, description = GYAZO_OPTION
+    option = {
+        "text": {"type": "mrkdwn", "text": f"*{label}*"},
+        "description": {"type": "mrkdwn", "text": description},
+        "value": "upload",
+    }
+    checkbox = {"type": "checkboxes", "action_id": GYAZO_ACTION, "options": [option]}
+    if enabled:  # Slack rejects an empty initial_options
+        checkbox["initial_options"] = [option]
+    return {"type": "actions", "block_id": GYAZO_ACTION, "elements": [checkbox]}
+
+
+def _key_blocks(keys: dict[str, str | None], preferences: dict[str, str]) -> list[dict]:
     blocks: list[dict] = [{"type": "header", "text": {"type": "plain_text", "text": "API Key"}}]
     for provider in PROVIDERS:
         key = keys.get(provider)
@@ -99,6 +122,8 @@ def _key_blocks(keys: dict[str, str | None]) -> list[dict]:
                 },
             }
         blocks.append(block)
+        if provider == "gyazo" and key:
+            blocks.append(_gyazo_actions(gyazo_enabled(preferences)))
     blocks.append(
         {
             "type": "actions",
@@ -171,7 +196,7 @@ def _model_blocks(preferences: dict[str, str], settings: Settings, notice: str |
     blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": MODEL_NOTE}]})
     if notice:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"ℹ️ {notice}"}})
-    if preferences:
+    if any(name in PREFERENCE_NAMES for name in preferences):  # the Gyazo switch is not reset
         blocks.append(
             {
                 "type": "actions",
@@ -194,7 +219,7 @@ def home_view(
     notice: str | None = None,
 ) -> dict:
     settings = settings or Settings.from_env()
-    blocks = _key_blocks(keys) + _model_blocks(preferences or {}, settings, notice)
+    blocks = _key_blocks(keys, preferences or {}) + _model_blocks(preferences or {}, settings, notice)
     blocks += [{"type": "divider"}, {"type": "section", "text": {"type": "mrkdwn", "text": messages.USAGE}}]
     return {"type": "home", "blocks": blocks}
 
@@ -253,6 +278,11 @@ async def change_preference(keystore: KeyStore, user_id: str, action_id: str, va
     return None
 
 
+async def change_gyazo(keystore: KeyStore, user_id: str, checked: bool) -> None:
+    """Save the Gyazo checkbox of the Home tab."""
+    await keystore.set_preferences(user_id, {GYAZO_SETTING: "on" if checked else "off"})
+
+
 async def change_polish_scope(keystore: KeyStore, user_id: str, selected: list[str]) -> None:
     """Save which yomiyasu passes are checked in the Home tab (every pass is saved, checked or not)."""
     await keystore.set_preferences(user_id, {name: "on" if name in selected else "off" for name in POLISH_SCOPES})
@@ -293,6 +323,13 @@ def register(app: AsyncApp, keystore: KeyStore) -> None:
         await ack()
         user_id = body["user"]["id"]
         await change_polish_scope(keystore, user_id, [o["value"] for o in action.get("selected_options") or []])
+        await publish(client, user_id)
+
+    @app.action(GYAZO_ACTION)
+    async def pick_gyazo(ack, body, action, client):
+        await ack()
+        user_id = body["user"]["id"]
+        await change_gyazo(keystore, user_id, bool(action.get("selected_options")))
         await publish(client, user_id)
 
     @app.action("pref_reset")

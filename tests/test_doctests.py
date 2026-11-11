@@ -21,7 +21,7 @@ MODULES = [
     "translation",
     "usage",
 ]
-OTHER_MODULES = ["bot.messages"]
+OTHER_MODULES = ["bot.keystore", "bot.messages"]
 
 
 def load_tests(loader, tests, ignore):

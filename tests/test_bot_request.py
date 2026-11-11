@@ -83,6 +83,33 @@ class CacheTests(unittest.TestCase):
         self.assertTrue((entry / "output/paper.gyazo.md").is_file())
         self.assertEqual(self.h.uploads, RESULT)
 
+    def test_gyazo_follows_the_home_tab(self):
+        keys = {"openai": "sk", "gyazo": "g"}
+        local = "# Paper Title\n\n翻訳 1\n"
+        self.h.run(ARXIV, keys=keys)  # on by default
+        self.assertEqual(self.h.gyazo_tokens, ["g"])
+        self.assertIn("• 図表 Gyazo にアップロードする", next(t for t in self.h.posted if t.startswith("🤖")))
+        self.assertEqual(self.h.markdown_texts[-1], "# Paper Title (gyazo)\n")
+        self.h.run(ARXIV, keys=keys, preferences={"gyazo": "off"})  # cached: the Markdown of the ZIP's figures
+        self.assertEqual(self.h.markdown_texts[-1], local)
+        self.h.run("<@UBOT> --refresh <https://arxiv.org/abs/2408.03326>", keys=keys, preferences={"gyazo": "off"})
+        self.assertEqual(self.h.gyazo_tokens, ["g", None])  # switched off: nothing is uploaded
+        started = [t for t in self.h.posted if t.startswith("🤖")][-1]
+        self.assertIn("• 図表 Gyazo にアップロードしない", started)
+        self.assertFalse((self.h.cache_dir / "arxiv-2408.03326v3/output/paper.gyazo.md").exists())
+        self.assertEqual(self.h.gyazo_uploads, [])
+
+    def test_a_cached_paper_without_gyazo_is_uploaded_for_a_user_who_wants_it(self):
+        self.h.run(ARXIV)  # stored without Gyazo (no token)
+        self.h.run(ARXIV, keys={"openai": "sk", "gyazo": "g"})
+        self.assertEqual(self.h.gyazo_uploads, ["g"])
+        self.assertEqual(self.h.markdown_texts[-1], "# Paper Title (uploaded for a cached paper)\n")
+        self.assertFalse((self.h.cache_dir / "arxiv-2408.03326v3/output/paper.gyazo.md").exists())  # not stored
+        self.h.run(ARXIV, keys={"openai": "sk", "gyazo": None})  # no token: the Markdown of the ZIP's figures
+        self.assertEqual(self.h.gyazo_uploads, ["g"])
+        self.assertEqual(self.h.markdown_texts[-1], "# Paper Title\n\n翻訳 1\n")
+        self.assertNotIn("Gyazo", "".join(t for t in self.h.posted if t.startswith("🤖")))  # no token: no line
+
     def test_refresh_replaces(self):
         sol = {"translation_model": "gpt-6.1-sol"}
         self.h.run(ARXIV)

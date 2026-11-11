@@ -398,6 +398,13 @@ def normalize_text(markdown: str) -> str:
     return text
 
 
+def replace_figure_tags(markdown: str, tags: dict[str, str]) -> str:
+    """Swap whole ``<img>`` tags (e.g. local figure paths for Gyazo URLs)."""
+    for old, new in tags.items():
+        markdown = markdown.replace(old, new)
+    return markdown
+
+
 def reference_list(entries: list[str]) -> str:
     r"""
     The reference entries as a Markdown list, each exactly as printed.

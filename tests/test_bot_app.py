@@ -135,6 +135,52 @@ def polish_checkboxes(view):
     return None
 
 
+def gyazo_checkbox(view):
+    """(the value of the Gyazo checkbox, whether it is checked), or None when it is not shown."""
+    for block in view["blocks"]:
+        for element in block.get("elements", []):
+            if element.get("action_id") == "pref_gyazo":
+                return element["options"][0]["value"], bool(element.get("initial_options"))
+    return None
+
+
+class GyazoSettingTests(unittest.TestCase):
+    def setUp(self):
+        self.store = KeyStore(Path(tempfile.mkdtemp()) / "keys.db")
+        self.app = FakeApp()
+        home.register(self.app, self.store)
+        self.client = mock.MagicMock(views_publish=mock.AsyncMock())
+
+    def check(self, checked):
+        action = {"selected_options": [{"value": "upload"}] if checked else []}
+        asyncio.run(
+            self.app.listeners["action:pref_gyazo"](mock.AsyncMock(), {"user": {"id": "U1"}}, action, self.client)
+        )
+
+    def test_checkbox_under_the_gyazo_token(self):
+        self.assertIsNone(gyazo_checkbox(home.home_view({"openai": "sk", "gyazo": None})))  # no token: no choice
+        self.assertEqual(gyazo_checkbox(home.home_view({"openai": "sk", "gyazo": "g"})), ("upload", True))  # default
+        view = home.home_view({"gyazo": "g"}, {"gyazo": "off"})
+        self.assertEqual(gyazo_checkbox(view), ("upload", False))
+        self.assertNotIn("pref_reset", str(view))  # the reset button is for the models
+
+    def test_checkbox_texts_fit_slack(self):
+        options = [home.GYAZO_OPTION, *home.POLISH_SCOPE_OPTIONS.values()]
+        for label, description in options:
+            self.assertLessEqual(len(f"*{label}*"), home.OPTION_TEXT_LIMIT)
+            self.assertLessEqual(len(description), home.OPTION_TEXT_LIMIT)
+
+    def test_listener_saves_and_the_model_reset_keeps_it(self):
+        self.check(False)
+        self.assertEqual(asyncio.run(self.store.preferences("U1")), {"gyazo": "off"})
+        self.client.views_publish.assert_awaited()
+        asyncio.run(home.change_preference(self.store, "U1", "pref_summary_effort", "high"))
+        asyncio.run(self.app.listeners["action:pref_reset"](mock.AsyncMock(), {"user": {"id": "U1"}}, self.client))
+        self.assertEqual(asyncio.run(self.store.preferences("U1")), {"gyazo": "off"})
+        self.check(True)
+        self.assertEqual(asyncio.run(self.store.preferences("U1")), {"gyazo": "on"})
+
+
 class ModelMenuTests(unittest.TestCase):
     def setUp(self):
         self.store = KeyStore(Path(tempfile.mkdtemp()) / "keys.db")

@@ -57,6 +57,9 @@ class BotHarness:
         self.failed_segments = 0
         self.polish_error = None
         self.pipeline_settings = []  # the Settings each pipeline run got
+        self.gyazo_tokens = []  # the Gyazo token each pipeline run got
+        self.gyazo_uploads = []  # tokens of figures uploaded for a cached paper
+        self.markdown_texts: list[str] = []  # the posted .md files
         self.stop_in_pipeline = False  # the requester presses 中断する while the pipeline runs
         self.tokens = []  # the CancelToken each pipeline run got
         self.blocks: list[list] = []  # the blocks of each posted message ([] without blocks)
@@ -79,6 +82,7 @@ class BotHarness:
             mock.patch.object(request_module, "download_arxiv_pdf", side_effect=self._download_arxiv),
             mock.patch.object(request_module, "fetch_pdf", side_effect=self._fetch),
             mock.patch.object(request_module, "download_slack_file", side_effect=self._download_slack),
+            mock.patch.object(request_module, "write_gyazo_markdown", side_effect=self._gyazo_markdown),
             mock.patch.object(request_module, "usd_to_jpy", return_value=(150.0, "2026-11-10")),
             mock.patch.dict(os.environ, {"PAPER_CACHE_DIR": str(self.cache_dir), "NO_CACHE_WORKDIR": str(self.shm)}),
         ]
@@ -105,6 +109,8 @@ class BotHarness:
             path = Path(item["file"])
             assert path.is_file(), path  # must still exist while uploading
             self.uploads.append(item["filename"])
+            if path.suffix == ".md":
+                self.markdown_texts.append(path.read_text())
             if path.suffix == ".zip":
                 with zipfile.ZipFile(path) as bundle:
                     self.zips.append(sorted(bundle.namelist()))
@@ -125,9 +131,15 @@ class BotHarness:
     async def _download_slack(self, url, dest, token, max_bytes):
         Path(dest).write_bytes(self.slack_files[url])
 
+    def _gyazo_markdown(self, markdown_path, figure_paths, token, out_path):
+        self.gyazo_uploads.append(token)
+        out_path.write_text("# Paper Title (uploaded for a cached paper)\n")
+        return out_path, 0
+
     def _pipeline(self, pdf_path, workdir, *, openai_api_key, gyazo_token, settings, progress, cancel, meter):
         self.pipeline_calls += 1
         self.pipeline_settings.append(settings)
+        self.gyazo_tokens.append(gyazo_token)
         self.tokens.append(cancel)
         meter.add("translation", settings.translation_model, {"input_tokens": 100_000, "output_tokens": 10_000})
         if self.stop_in_pipeline:

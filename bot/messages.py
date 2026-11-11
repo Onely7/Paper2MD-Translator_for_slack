@@ -18,6 +18,9 @@ USAGE = (
     "`--no-cache`（または `キャッシュなし`）を付けると、送った PDF・途中のファイル・結果を一時領域だけで扱い、"
     "結果を投稿したあとすべて削除します。\n"
     "```@Paper2MD-Translator --no-cache\nhttps://arxiv.org/abs/0000.00000```\n"
+    "*図表の Gyazo へのアップロード*\n"
+    "Home タブで Gyazo のアクセストークンを登録すると、図表を Gyazo にアップロードし、"
+    "投稿する Markdown の図表を Gyazo の画像 URL にします。アップロードするかどうかは、Home タブのチェックで選べます。\n"
     "*モデル*\n"
     "訳語表、翻訳、推敲（yomiyasu）、要約に使うモデルと Reasoning Effort は、"
     "Paper2MD-Translator の Home タブの「モデル」で選べます。推敲をしないこともできます。\n"
@@ -176,6 +179,11 @@ def new_version(arxiv_id: str, done: str, latest: int) -> str:
 def failed_segments(count: int, no_cache: bool) -> str:
     text = f"⚠️ {count} か所の翻訳に失敗しました。該当箇所には Markdown 内に ⚠️ の注記があります。"
     return text + ("" if no_cache else "この結果はキャッシュしないので、次回は翻訳し直します。")
+
+
+def gyazo_line(upload: bool) -> str:
+    """The line of the first message that says what happens to the figures (for a user with a Gyazo token)."""
+    return "図表 Gyazo にアップロードする" if upload else "図表 Gyazo にアップロードしない"
 
 
 def gyazo_failures(count: int) -> str:

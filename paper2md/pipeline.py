@@ -10,7 +10,8 @@ PDF -> Japanese Markdown + summary.
         output/
             paper.md               Markdown; figures linked as figures/figNN.png
                                    (title, headings and references copied from the PDF)
-            paper.gyazo.md         the same with Gyazo image URLs (with a Gyazo token)
+            paper.gyazo.md         the same with Gyazo image URLs (with a Gyazo token, when a
+                                   figure could be uploaded)
             figures/figNN.png
             summary.md
 
@@ -41,7 +42,7 @@ from .figures import export_figures, img_tag, upload_all_to_gyazo
 from .glossary import build_glossary, glossary_records
 from .layout import TEXT_LABELS, attach_printed_text, build_segments, crop_segments, promote_header_headings
 from .llm import OpenAIClient
-from .markdown import finalize_markdown, first_heading, format_markdown, normalize_text
+from .markdown import finalize_markdown, first_heading, format_markdown, normalize_text, replace_figure_tags
 from .pdf import PdfError, render_pages
 from .polish import PolishStats, polish_document, polish_segments
 from .progress import ProgressFactory, console_progress
@@ -88,6 +89,27 @@ def _assemble(count: int, parts: dict[int, str], figures: dict[int, str]) -> str
 def _polish_failure(error: Exception) -> str:
     logger.warning("Polishing stopped: %s: %s", type(error).__name__, error)
     return f"{type(error).__name__}: {error}"[:300]
+
+
+def write_gyazo_markdown(
+    markdown_path: Path, figure_paths: list[Path], token: str, out_path: Path
+) -> tuple[Path | None, int]:
+    """
+    Upload the figures to Gyazo and write the Markdown with their URLs to ``out_path``.
+
+    Returns (``out_path``, or None when no figure could be uploaded; the number of figures that failed).
+    """
+    urls = upload_all_to_gyazo(figure_paths, token)
+    tags = {
+        img_tag(f"figures/{path.name}", path.name): img_tag(url, path.name)
+        for path, url in zip(figure_paths, urls, strict=True)
+        if url
+    }
+    failures = sum(url is None for url in urls)
+    if not tags:
+        return None, failures
+    out_path.write_text(replace_figure_tags(markdown_path.read_text(encoding="utf-8"), tags), encoding="utf-8")
+    return out_path, failures
 
 
 def translate_paper(
@@ -204,14 +226,9 @@ def translate_paper(
     gyazo_path, gyazo_failures = None, 0
     cancel.check()
     if gyazo_token and figure_paths:
-        urls = upload_all_to_gyazo(figure_paths, gyazo_token)
-        gyazo_failures = sum(url is None for url in urls)
-        gyazo_figures = {
-            i: img_tag(url, p.name) if url else local_figures[i]
-            for i, p, url in zip(figure_indices, figure_paths, urls, strict=True)
-        }
-        gyazo_path = output_dir / "paper.gyazo.md"
-        gyazo_path.write_text(_assemble(len(segments), parts, gyazo_figures), encoding="utf-8")
+        gyazo_path, gyazo_failures = write_gyazo_markdown(
+            markdown_path, figure_paths, gyazo_token, output_dir / "paper.gyazo.md"
+        )
 
     with (workdir / "segments.jsonl").open("w", encoding="utf-8") as f:
         for index, segment in enumerate(segments):

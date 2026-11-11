@@ -10,6 +10,12 @@ One translation request from Slack.
 deleted at the end; the cache is read but never written.
 ``--refresh``: the cache is not read; the new result replaces the cached one.
 
+Gyazo (the Home tab checkbox, on by default): the figures of a new translation
+are uploaded with the user's token.  For a cached paper, the stored Gyazo
+version is posted, or, when there is none, the figures are uploaded with the
+user's token for this post only.  With the checkbox off, the Markdown that
+links the figures in the ZIP is posted.
+
 The first message of a translation carries the 中断する button (``cancel.py``):
 the requester can stop the job while it waits for its turn or runs; nothing is
 cached and its files are removed.  The thread ends with the OpenAI API cost of
@@ -38,7 +44,7 @@ from paper2md.llm import InsufficientQuotaError, ModelNotAvailableError
 from paper2md.models import ModelChoice
 from paper2md.options import parse_request_options
 from paper2md.pdf import PdfError, check_limits, fetch_pdf, file_sha256
-from paper2md.pipeline import translate_paper
+from paper2md.pipeline import translate_paper, write_gyazo_markdown
 from paper2md.progress import slack_progress
 from paper2md.sources import (
     PaperRef,
@@ -54,7 +60,7 @@ from paper2md.workspace import create_private_workdir, ephemeral_workdir, purge_
 from . import messages
 from .cancel import Job, RunningJobs
 from .jobs import JobQueue, PaperLocks
-from .keystore import KeyStore
+from .keystore import KeyStore, gyazo_enabled
 from .slack_io import Deliverable, deliver, download_slack_file, edit, post
 
 logger = logging.getLogger(__name__)
@@ -127,9 +133,12 @@ class RequestHandler:
         cost: str | None = None  # "cache": answered from the cache; "api": OpenAI was (or could be) used
         complete = False
         try:
-            # the user's models (Home tab), else the server defaults
-            choice = ModelChoice.resolve(await self.keystore.preferences(user_id), settings)
+            # the user's models and Gyazo switch (Home tab), else the server defaults
+            preferences = await self.keystore.preferences(user_id)
+            choice = ModelChoice.resolve(preferences, settings)
             settings = choice.apply(settings)
+            gyazo_key = await self.keystore.get(user_id, "gyazo")
+            gyazo_token = gyazo_key if gyazo_enabled(preferences) else None
             if options.no_cache:
                 await say(messages.NO_CACHE_NOTICE)
                 await asyncio.to_thread(purge_stale_workdirs)
@@ -144,7 +153,7 @@ class RequestHandler:
             paper = await self._identify(client, ref, cache, workdir, settings, use_cache=not options.refresh)
             if paper.cached is not None:
                 await self._deliver_cached(
-                    client, channel, thread_ts, paper, paper.cached, choice, include_pdf, workdir
+                    client, channel, thread_ts, paper, paper.cached, choice, include_pdf, workdir, gyazo_token
                 )
                 cost = "cache"
                 return
@@ -154,7 +163,6 @@ class RequestHandler:
             if not openai_key:
                 await say(messages.NO_OPENAI_KEY)
                 return
-            gyazo_key = await self.keystore.get(user_id, "gyazo")
             if not options.no_cache:
                 logger.info("Translating %s (%s)", paper.display_name, paper.keys[0])
             if paper.is_latest_arxiv:
@@ -180,11 +188,12 @@ class RequestHandler:
                     cached = await asyncio.to_thread(cache.find, paper.keys)
                     if cached is not None:
                         await self._deliver_cached(
-                            client, channel, thread_ts, paper, cached, choice, include_pdf, workdir
+                            client, channel, thread_ts, paper, cached, choice, include_pdf, workdir, gyazo_token
                         )
                         cost = "cache"
                         return
-                start_text = messages.translating_with(choice.lines())
+                gyazo_line = [messages.gyazo_line(gyazo_token is not None)] if gyazo_key else []
+                start_text = messages.translating_with(choice.lines() + gyazo_line)
                 start_ts = await post(
                     client, channel, thread_ts, start_text, messages.with_cancel_button(start_text, job_id)
                 )
@@ -197,7 +206,7 @@ class RequestHandler:
                             paper.pdf_path,
                             workdir,
                             openai_api_key=openai_key,
-                            gyazo_token=gyazo_key,
+                            gyazo_token=gyazo_token,
                             settings=settings,
                             progress=slack_progress(WebClient(token=client.token), channel, thread_ts),
                             cancel=token,
@@ -311,7 +320,9 @@ class RequestHandler:
         choice: ModelChoice,
         include_pdf: bool,
         scratch: Path,
+        gyazo_token: str | None,
     ) -> None:
+        """Post a cached paper; ``gyazo_token`` is None when the user switched Gyazo off (or has no token)."""
         if paper.is_latest_arxiv:
             subject = f"arXiv:{paper.ref.arxiv_id} の最新版（v{paper.arxiv_version}）は"
         elif paper.ref.kind == "arxiv":
@@ -337,7 +348,22 @@ class RequestHandler:
         await post(
             client, channel, thread_ts, messages.cache_hit(subject, entry.created_date, cached.describe(), current)
         )
-        await deliver(client, channel, thread_ts, Deliverable.from_entry(entry, include_pdf), scratch)
+        deliverable = Deliverable.from_entry(entry, include_pdf)
+        failures = 0
+        if gyazo_token is None:
+            deliverable.gyazo_markdown_path = None  # the user wants no Gyazo: the figures of the ZIP
+        elif deliverable.gyazo_markdown_path is None and deliverable.figure_paths:
+            # stored without Gyazo: upload with this user's token, for this post only
+            deliverable.gyazo_markdown_path, failures = await asyncio.to_thread(
+                write_gyazo_markdown,
+                entry.markdown_path,
+                deliverable.figure_paths,
+                gyazo_token,
+                scratch / "paper.gyazo.md",
+            )
+        await deliver(client, channel, thread_ts, deliverable, scratch)
+        if failures:
+            await post(client, channel, thread_ts, messages.gyazo_failures(failures))
 
     @staticmethod
     def _manifest_info(paper: _Paper) -> dict:
